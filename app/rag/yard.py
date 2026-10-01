@@ -22,6 +22,11 @@ from pathlib import Path
 from app.rag.boards import Board
 from app.rag.embeddings import Embedding, build_embedding
 from app.rag.grading import Grade, Inspection
+from app.rag.hybrid_search import (
+    merge_candidates,
+    normalize_scores,
+    rank_hybrid,
+)
 from app.rag.stacker import Stack, StackedBoard
 from app.rag.vector_search import VectorBoard, search_vectors
 
@@ -810,6 +815,100 @@ class LumberYard:
                 score=match.similarity,
             )
             for match in matches
+        ]
+
+    def hybrid_search(
+        self,
+        query_text: str,
+        query_embedding: Embedding,
+        limit: int = 5,
+        lexical_weight: float = 0.5,
+        vector_weight: float = 0.5,
+        minimum_similarity: float = -1.0,
+        include_review: bool = False,
+        collection_id: str = "default",
+        stack_name: str | None = None,
+    ) -> list[SearchResult]:
+        """Retrieve evidence using lexical and semantic signals."""
+
+        if limit < 1:
+            raise ValueError(
+                "limit must be positive."
+            )
+
+        # Pull a wider candidate pool than the final result set.
+        # Ranking needs enough lumber from both retrieval paths
+        # to make a meaningful hybrid decision.
+        candidate_limit = max(
+            limit * 4,
+            20,
+        )
+
+        lexical_results = self.search(
+            query_text,
+            limit=candidate_limit,
+            include_review=include_review,
+            collection_id=collection_id,
+            stack_name=stack_name,
+        )
+
+        vector_results = self.vector_search(
+            query_embedding,
+            limit=candidate_limit,
+            minimum_similarity=minimum_similarity,
+            include_review=include_review,
+            collection_id=collection_id,
+            stack_name=stack_name,
+        )
+
+        lexical_scores = {
+            result.board.board_id: result.score
+            for result in lexical_results
+        }
+
+        vector_scores = {
+            result.board.board_id: result.score
+            for result in vector_results
+        }
+
+        normalized_lexical = normalize_scores(
+            lexical_scores
+        )
+
+        normalized_vector = normalize_scores(
+            vector_scores
+        )
+
+        candidates = merge_candidates(
+            normalized_lexical,
+            normalized_vector,
+        )
+
+        ranked = rank_hybrid(
+            candidates,
+            lexical_weight=lexical_weight,
+            vector_weight=vector_weight,
+            limit=limit,
+        )
+
+        boards: dict[str, StoredBoard] = {}
+
+        for result in lexical_results:
+            boards[result.board.board_id] = (
+                result.board
+            )
+
+        for result in vector_results:
+            boards[result.board.board_id] = (
+                result.board
+            )
+
+        return [
+            SearchResult(
+                board=boards[result.board_id],
+                score=result.score,
+            )
+            for result in ranked
         ]
 
     def count(
