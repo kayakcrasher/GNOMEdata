@@ -616,3 +616,52 @@ def test_pipeline_routes_lumber_to_collection(
 
     finally:
         yard.close()
+
+
+def test_pipeline_persists_stack_assignments(
+    tmp_path,
+) -> None:
+    text = (
+        "Warning: inspect and service the hydraulic "
+        "pump during scheduled maintenance."
+    )
+
+    yard = LumberYard(
+        tmp_path / "yard.db"
+    )
+
+    pipeline = MillPipeline(
+        yard=yard,
+        embedder=StaticEmbedder(
+            {
+                text: [1.0, 0.0],
+            },
+            model_name="stack-pipeline-model",
+        ),
+    )
+
+    try:
+        report = pipeline.process(
+            Log(
+                "stack-pipeline-log",
+                "manual.txt",
+                text,
+            )
+        )
+
+        board_id = (
+            report.boards[0].board.board_id
+        )
+
+        stored = yard.get_stacks(board_id)
+
+        names = {
+            stack.name
+            for stack in stored.stacks
+        }
+
+        assert "maintenance" in names
+        assert "safety" in names
+
+    finally:
+        yard.close()

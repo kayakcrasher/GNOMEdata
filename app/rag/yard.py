@@ -22,6 +22,7 @@ from pathlib import Path
 from app.rag.boards import Board
 from app.rag.embeddings import Embedding, build_embedding
 from app.rag.grading import Grade, Inspection
+from app.rag.stacker import Stack, StackedBoard
 from app.rag.vector_search import VectorBoard, search_vectors
 
 
@@ -88,6 +89,7 @@ class LumberYard:
 
         self._create_schema()
         self._migrate_collections()
+        self._create_stack_schema()
 
     def _create_schema(self) -> None:
         """Create Lumber Yard tables and indexes."""
@@ -152,6 +154,40 @@ class LumberYard:
             self._connection.execute("""
                 CREATE INDEX IF NOT EXISTS idx_embeddings_model
                 ON board_embeddings(model)
+            """)
+
+    def _create_stack_schema(self) -> None:
+        """Create durable storage for board stack assignments."""
+
+        with self._connection:
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS board_stacks (
+                    board_id TEXT NOT NULL,
+                    stack_name TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    matched_terms_json TEXT NOT NULL
+                        DEFAULT '[]',
+
+                    PRIMARY KEY (
+                        board_id,
+                        stack_name
+                    ),
+
+                    FOREIGN KEY (board_id)
+                    REFERENCES boards(board_id)
+                    ON DELETE CASCADE,
+
+                    CHECK (
+                        confidence >= 0.0
+                        AND confidence <= 1.0
+                    )
+                )
+            """)
+
+            self._connection.execute("""
+                CREATE INDEX IF NOT EXISTS
+                    idx_board_stacks_name
+                ON board_stacks(stack_name)
             """)
 
     def _migrate_collections(self) -> None:
@@ -343,6 +379,111 @@ class LumberYard:
                 ),
                 collection_id,
             ))
+
+    def set_stacks(
+        self,
+        stacking: StackedBoard,
+    ) -> None:
+        """Replace one board's persistent stack assignments."""
+
+        board_id = stacking.board_id.strip()
+
+        if not board_id:
+            raise ValueError(
+                "board_id cannot be empty."
+            )
+
+        if self.get_board(board_id) is None:
+            raise KeyError(
+                f"unknown board: {board_id}"
+            )
+
+        with self._connection:
+            self._connection.execute("""
+                DELETE FROM board_stacks
+                WHERE board_id = ?
+            """, (
+                board_id,
+            ))
+
+            for stack in stacking.stacks:
+                if not stack.name.strip():
+                    raise ValueError(
+                        "stack name cannot be empty."
+                    )
+
+                if not 0.0 <= stack.confidence <= 1.0:
+                    raise ValueError(
+                        "stack confidence must be "
+                        "between 0 and 1."
+                    )
+
+                self._connection.execute("""
+                    INSERT INTO board_stacks (
+                        board_id,
+                        stack_name,
+                        confidence,
+                        matched_terms_json
+                    )
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    board_id,
+                    stack.name,
+                    stack.confidence,
+                    json.dumps(
+                        stack.matched_terms
+                    ),
+                ))
+
+    def get_stacks(
+        self,
+        board_id: str,
+    ) -> StackedBoard:
+        """Recover persistent stack assignments for one board."""
+
+        if not board_id.strip():
+            raise ValueError(
+                "board_id cannot be empty."
+            )
+
+        if self.get_board(board_id) is None:
+            raise KeyError(
+                f"unknown board: {board_id}"
+            )
+
+        rows = self._connection.execute("""
+            SELECT
+                stack_name,
+                confidence,
+                matched_terms_json
+            FROM board_stacks
+            WHERE board_id = ?
+            ORDER BY
+                confidence DESC,
+                stack_name ASC
+        """, (
+            board_id,
+        )).fetchall()
+
+        stacks = tuple(
+            Stack(
+                name=row["stack_name"],
+                confidence=float(
+                    row["confidence"]
+                ),
+                matched_terms=tuple(
+                    json.loads(
+                        row["matched_terms_json"]
+                    )
+                ),
+            )
+            for row in rows
+        )
+
+        return StackedBoard(
+            board_id=board_id,
+            stacks=stacks,
+        )
 
     def add_embedding(
         self,

@@ -162,6 +162,10 @@ class MillPipeline:
                 collection_id=self.collection_id,
             )
 
+            self.yard.set_stacks(
+                stacking
+            )
+
             should_embed = (
                 inspection.grade == Grade.ACCEPT
                 or (
