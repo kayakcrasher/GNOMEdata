@@ -600,6 +600,7 @@ class LumberYard:
         limit: int = 5,
         include_review: bool = False,
         collection_id: str = "default",
+        stack_name: str | None = None,
     ) -> list[SearchResult]:
         """Retrieve boards by lexical relevance."""
 
@@ -620,6 +621,7 @@ class LumberYard:
         rows = self._searchable_rows(
             include_review,
             collection_id,
+            stack_name,
         )
 
         results: list[SearchResult] = []
@@ -694,6 +696,7 @@ class LumberYard:
         minimum_similarity: float = -1.0,
         include_review: bool = False,
         collection_id: str = "default",
+        stack_name: str | None = None,
     ) -> list[SearchResult]:
         """Retrieve boards from the Lumber Yard by vector similarity."""
 
@@ -702,7 +705,39 @@ class LumberYard:
                 "limit must be positive."
             )
 
-        rows = self._connection.execute("""
+        parameters: list[object] = [
+            query.model,
+            collection_id,
+            (
+                "review"
+                if include_review
+                else "accept"
+            ),
+        ]
+
+        stack_clause = ""
+
+        if stack_name is not None:
+            stack_name = stack_name.strip()
+
+            if not stack_name:
+                raise ValueError(
+                    "stack_name cannot be empty."
+                )
+
+            stack_clause = """
+              AND EXISTS (
+                  SELECT 1
+                  FROM board_stacks AS s
+                  WHERE s.board_id = b.board_id
+                    AND s.stack_name = ?
+              )
+            """
+
+            parameters.append(stack_name)
+
+        rows = self._connection.execute(
+            f"""
             SELECT
                 b.*,
                 e.model AS embedding_model,
@@ -717,15 +752,10 @@ class LumberYard:
                   'accept',
                   ?
               )
-        """, (
-            query.model,
-            collection_id,
-            (
-                "review"
-                if include_review
-                else "accept"
-            ),
-        )).fetchall()
+              {stack_clause}
+            """,
+            parameters,
+        ).fetchall()
 
         vector_boards: list[VectorBoard] = []
 
@@ -808,30 +838,51 @@ class LumberYard:
         self,
         include_review: bool,
         collection_id: str = "default",
+        stack_name: str | None = None,
     ) -> list[sqlite3.Row]:
         """Return boards eligible for retrieval."""
 
-        if include_review:
-            return self._connection.execute("""
-                SELECT *
-                FROM boards
-                WHERE collection_id = ?
-                  AND grade IN (
-                      'accept',
-                      'review'
-                  )
-            """, (
-                collection_id,
-            )).fetchall()
+        parameters: list[object] = [
+            collection_id,
+        ]
 
-        return self._connection.execute("""
+        grade_clause = (
+            "grade IN ('accept', 'review')"
+            if include_review
+            else "grade = 'accept'"
+        )
+
+        stack_clause = ""
+
+        if stack_name is not None:
+            stack_name = stack_name.strip()
+
+            if not stack_name:
+                raise ValueError(
+                    "stack_name cannot be empty."
+                )
+
+            stack_clause = """
+                AND EXISTS (
+                    SELECT 1
+                    FROM board_stacks AS s
+                    WHERE s.board_id = boards.board_id
+                      AND s.stack_name = ?
+                )
+            """
+
+            parameters.append(stack_name)
+
+        return self._connection.execute(
+            f"""
             SELECT *
             FROM boards
             WHERE collection_id = ?
-              AND grade = 'accept'
-        """, (
-            collection_id,
-        )).fetchall()
+              AND {grade_clause}
+              {stack_clause}
+            """,
+            parameters,
+        ).fetchall()
 
     def close(self) -> None:
         """Close the database connection."""

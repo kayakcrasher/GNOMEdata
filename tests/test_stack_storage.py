@@ -176,3 +176,128 @@ def test_board_with_no_matches_has_empty_stack_set(
 
         assert stored.board_id == board.board_id
         assert stored.stacks == ()
+
+
+def test_vector_search_can_filter_by_stack(
+    tmp_path,
+) -> None:
+    from app.rag.embeddings import build_embedding
+
+    with LumberYard(tmp_path / "yard.db") as yard:
+        maintenance = make_board(
+            "maintenance-board",
+            "Inspect and service the hydraulic pump.",
+        )
+
+        safety = make_board(
+            "safety-board",
+            "Warning danger hazard injury.",
+        )
+
+        yard.add_board(
+            maintenance,
+            Inspection(Grade.ACCEPT, ()),
+        )
+
+        yard.add_board(
+            safety,
+            Inspection(Grade.ACCEPT, ()),
+        )
+
+        yard.set_stacks(
+            sort_board(
+                maintenance.board_id,
+                maintenance.text,
+            )
+        )
+
+        yard.set_stacks(
+            sort_board(
+                safety.board_id,
+                safety.text,
+            )
+        )
+
+        # Deliberately give both boards identical vectors.
+        # Stack filtering, not cosine similarity, must
+        # determine which board is eligible.
+        vector = build_embedding(
+            [1.0, 0.0],
+            "stack-filter-model",
+        )
+
+        yard.add_embedding(
+            maintenance.board_id,
+            vector,
+        )
+
+        yard.add_embedding(
+            safety.board_id,
+            vector,
+        )
+
+        query = build_embedding(
+            [1.0, 0.0],
+            "stack-filter-model",
+        )
+
+        results = yard.vector_search(
+            query,
+            stack_name="maintenance",
+        )
+
+        assert len(results) == 1
+        assert (
+            results[0].board.board_id
+            == "maintenance-board"
+        )
+
+
+def test_lexical_search_can_filter_by_stack(
+    tmp_path,
+) -> None:
+    with LumberYard(tmp_path / "yard.db") as yard:
+        maintenance = make_board(
+            "maintenance-lexical",
+            "Hydraulic pump service instructions.",
+        )
+
+        safety = make_board(
+            "safety-lexical",
+            "Hydraulic pump safety warning.",
+        )
+
+        yard.add_board(
+            maintenance,
+            Inspection(Grade.ACCEPT, ()),
+        )
+
+        yard.add_board(
+            safety,
+            Inspection(Grade.ACCEPT, ()),
+        )
+
+        yard.set_stacks(
+            sort_board(
+                maintenance.board_id,
+                "Inspect service maintenance.",
+            )
+        )
+
+        yard.set_stacks(
+            sort_board(
+                safety.board_id,
+                "Warning danger safety hazard.",
+            )
+        )
+
+        results = yard.search(
+            "hydraulic pump",
+            stack_name="maintenance",
+        )
+
+        assert len(results) == 1
+        assert (
+            results[0].board.board_id
+            == "maintenance-lexical"
+        )
