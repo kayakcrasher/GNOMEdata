@@ -6,10 +6,7 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 
-from app.rag.huggingface_embedder import (
-    HuggingFaceConfig,
-    HuggingFaceEmbedder,
-)
+from app.rag.local_embedder import LocalHashEmbedder
 from app.rag.yard import LumberYard
 
 
@@ -20,8 +17,7 @@ async def lifespan(app: FastAPI):
     load_dotenv()
 
     yard = LumberYard("data/gnomedata.db")
-    config = HuggingFaceConfig.from_env()
-    embedder = HuggingFaceEmbedder(config)
+    embedder = LocalHashEmbedder()
 
     app.state.yard = yard
     app.state.embedder = embedder
@@ -73,7 +69,6 @@ from uuid import uuid4
 from app.rag.boards import Log
 from app.rag.pipeline import MillPipeline
 from app.core.query import LocalQueryEngine
-from app.rag.local_embedder import LocalHashEmbedder
 
 
 NonEmptyText = Annotated[
@@ -844,9 +839,14 @@ async function loadWorkspace() {
         }
     } catch (error) {
         workspaceSummary.textContent =
-            "Unable to load Lumber Yard.";
+            "Unable to load Lumber Yard: " +
+            String(error);
 
         boardGrid.innerHTML = "";
+        console.error(
+            "GNOMEdata workspace error:",
+            error
+        );
     }
 }
 
@@ -892,26 +892,40 @@ queryButton.addEventListener("click", async () => {
     queryResult.textContent =
         "Searching local lumber...";
 
-    const response = await fetch(
-        "/api/query",
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                question: question,
-                collection_id: collectionId,
-                board_ids: selectedBoards,
-                allow_online:
-                    document.getElementById(
-                        "allow-online"
-                    ).checked
-            })
-        }
-    );
+    let response;
+    let body;
 
-    const body = await response.json();
+    try {
+        response = await fetch(
+            "/api/query",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    question: question,
+                    collection_id: collectionId,
+                    board_ids:
+                        selectedBoards.length > 0
+                            ? selectedBoards
+                            : null,
+                    allow_online:
+                        document.getElementById(
+                            "allow-online"
+                        ).checked
+                })
+            }
+        );
+
+        body = await response.json();
+    } catch (error) {
+        queryResult.textContent =
+            "Unable to reach the GNOMEdata query engine.\n" +
+            String(error);
+
+        return;
+    }
 
     if (!response.ok) {
         queryResult.textContent =
