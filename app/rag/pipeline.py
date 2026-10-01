@@ -100,6 +100,7 @@ class MillPipeline:
         board_size: int = 800,
         overlap: int = 120,
         embed_review: bool = True,
+        collection_id: str = "default",
     ) -> None:
         if board_size < 1:
             raise ValueError(
@@ -112,11 +113,24 @@ class MillPipeline:
                 "smaller than board_size."
             )
 
+        collection_id = collection_id.strip()
+
+        if not collection_id:
+            raise ValueError(
+                "collection_id cannot be empty."
+            )
+
+        if yard.get_collection(collection_id) is None:
+            raise KeyError(
+                f"unknown collection: {collection_id}"
+            )
+
         self.yard = yard
         self.embedder = embedder
         self.board_size = board_size
         self.overlap = overlap
         self.embed_review = embed_review
+        self.collection_id = collection_id
 
     def process(
         self,
@@ -145,6 +159,7 @@ class MillPipeline:
             self.yard.add_board(
                 board,
                 inspection,
+                collection_id=self.collection_id,
             )
 
             should_embed = (

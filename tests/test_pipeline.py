@@ -566,3 +566,53 @@ def test_milled_vectors_survive_full_yard_reopening(
             == "persistent-log:board:0"
         )
         assert results[0].score > 0.9
+
+
+def test_pipeline_routes_lumber_to_collection(
+    tmp_path,
+) -> None:
+    text = (
+        "Inspect hydraulic hoses and service "
+        "the pump during scheduled maintenance."
+    )
+
+    yard = LumberYard(
+        tmp_path / "yard.db"
+    )
+
+    yard.create_collection(
+        "hydraulics",
+        "Hydraulic Manuals",
+    )
+
+    pipeline = MillPipeline(
+        yard=yard,
+        embedder=StaticEmbedder(
+            {
+                text: [1.0, 0.0],
+            },
+            model_name="collection-test-model",
+        ),
+        collection_id="hydraulics",
+    )
+
+    try:
+        report = pipeline.process(
+            Log(
+                "hydraulic-log",
+                "hydraulic-manual.txt",
+                text,
+            )
+        )
+
+        assert report.total == 1
+
+        board = yard.get_board(
+            "hydraulic-log:board:0"
+        )
+
+        assert board is not None
+        assert board.collection_id == "hydraulics"
+
+    finally:
+        yard.close()
