@@ -88,7 +88,8 @@ class LumberYard:
             )
 
         self._connection = sqlite3.connect(
-            self.database
+            self.database,
+            check_same_thread=False,
         )
         self._connection.row_factory = sqlite3.Row
 
