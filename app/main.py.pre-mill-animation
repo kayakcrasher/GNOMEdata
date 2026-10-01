@@ -1,0 +1,331 @@
+
+"""GNOMEdata API application."""
+
+from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+from fastapi import FastAPI
+
+from app.rag.huggingface_embedder import (
+    HuggingFaceConfig,
+    HuggingFaceEmbedder,
+)
+from app.rag.yard import LumberYard
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Own GNOMEdata's long-lived application resources."""
+
+    load_dotenv()
+
+    yard = LumberYard("data/gnomedata.db")
+    config = HuggingFaceConfig.from_env()
+    embedder = HuggingFaceEmbedder(config)
+
+    app.state.yard = yard
+    app.state.embedder = embedder
+
+    try:
+        yield
+    finally:
+        yard.close()
+
+
+app = FastAPI(
+    title="GNOMEdata API",
+    description=(
+        "A document-grounded knowledge assistant "
+        "for small businesses."
+    ),
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+
+@app.get("/", tags=["system"])
+def root() -> dict[str, str]:
+    """Return basic service information."""
+    return {
+        "name": "GNOMEdata",
+        "status": "prototype",
+        "message": "Welcome to the GNOMEdata API.",
+    }
+
+
+@app.get("/health", tags=["system"])
+def health() -> dict[str, str]:
+    """Check whether the API is responding."""
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Loading Dock
+# ---------------------------------------------------------------------------
+
+from typing import Annotated
+
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, StringConstraints
+
+from uuid import uuid4
+
+from app.rag.boards import Log
+from app.rag.pipeline import MillPipeline
+
+
+NonEmptyText = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+    ),
+]
+
+
+class IngestRequest(BaseModel):
+    """Raw information delivered to the GNOMEdata mill."""
+
+    collection_id: NonEmptyText
+    source_name: NonEmptyText
+    text: NonEmptyText
+
+
+@app.get(
+    "/dock",
+    response_class=HTMLResponse,
+    tags=["loading-dock"],
+)
+def loading_dock() -> str:
+    """Serve the human-facing GNOMEdata Loading Dock."""
+
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>GNOMEdata Loading Dock</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: system-ui, sans-serif;
+            background: #111813;
+            color: #edf4ed;
+        }
+
+        main {
+            width: min(900px, 92%);
+            margin: auto;
+            padding: 48px 0;
+        }
+
+        .panel {
+            padding: 28px;
+            border: 1px solid #34463a;
+            border-radius: 16px;
+            background: #1b251e;
+        }
+
+        h1 {
+            margin-top: 0;
+        }
+
+        .subtitle {
+            color: #b8c7bb;
+        }
+
+        label {
+            display: block;
+            margin: 18px 0 6px;
+            font-weight: 700;
+        }
+
+        input,
+        textarea,
+        button {
+            width: 100%;
+            font: inherit;
+            border-radius: 8px;
+        }
+
+        input,
+        textarea {
+            padding: 12px;
+            border: 1px solid #526557;
+            background: #0e1510;
+            color: #edf4ed;
+        }
+
+        textarea {
+            min-height: 260px;
+            resize: vertical;
+        }
+
+        button {
+            margin-top: 20px;
+            padding: 14px;
+            border: 0;
+            cursor: pointer;
+            font-weight: 800;
+        }
+
+        #result {
+            margin-top: 20px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+
+<body>
+<main>
+    <section class="panel">
+        <h1>GNOMEdata</h1>
+
+        <p class="subtitle">
+            Loading Dock — deliver information to the mill.
+        </p>
+
+        <form id="ingest-form">
+            <label for="collection">
+                Collection
+            </label>
+
+            <input
+                id="collection"
+                value="default"
+                required
+            >
+
+            <label for="source">
+                Source name
+            </label>
+
+            <input
+                id="source"
+                placeholder="manual.txt"
+                required
+            >
+
+            <label for="text">
+                Information
+            </label>
+
+            <textarea
+                id="text"
+                placeholder="Paste information here..."
+                required
+            ></textarea>
+
+            <button type="submit">
+                MILL THIS
+            </button>
+        </form>
+
+        <div id="result"></div>
+    </section>
+</main>
+
+<script>
+const form = document.getElementById("ingest-form");
+const result = document.getElementById("result");
+
+form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    result.textContent = "Sending lumber to the mill...";
+
+    const response = await fetch("/api/ingest", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            collection_id:
+                document.getElementById("collection").value,
+            source_name:
+                document.getElementById("source").value,
+            text:
+                document.getElementById("text").value
+        })
+    });
+
+    const body = await response.json();
+
+    if (!response.ok) {
+        result.textContent =
+            "Mill rejected the load:\\n" +
+            JSON.stringify(body, null, 2);
+
+        return;
+    }
+
+    result.textContent =
+        "Lumber accepted!\\n" +
+        "Source: " + body.source_name + "\\n" +
+        "Collection: " + body.collection_id;
+});
+</script>
+</body>
+</html>
+"""
+
+
+@app.post(
+    "/api/ingest",
+    tags=["loading-dock"],
+)
+def ingest(
+    request: IngestRequest,
+) -> dict[str, str | int]:
+    """Mill one load delivered through the Loading Dock."""
+
+    yard = getattr(app.state, "yard", None)
+    embedder = getattr(app.state, "embedder", None)
+
+    if yard is None:
+        raise RuntimeError(
+            "GNOMEdata Lumber Yard is not configured."
+        )
+
+    if embedder is None:
+        raise RuntimeError(
+            "GNOMEdata embedder is not configured."
+        )
+
+    mill = MillPipeline(
+        yard=yard,
+        embedder=embedder,
+        collection_id=request.collection_id,
+    )
+
+    log = Log(
+        log_id=f"dock-{uuid4().hex}",
+        source_name=request.source_name,
+        text=request.text,
+    )
+
+    report = mill.process(log)
+
+    return {
+        "status": "milled",
+        "source_name": report.source_name,
+        "collection_id": request.collection_id,
+        "log_id": report.log_id,
+        "total": report.total,
+        "accepted": report.accepted,
+        "review": report.review,
+        "rejected": report.rejected,
+        "embedded": report.embedded,
+    }
