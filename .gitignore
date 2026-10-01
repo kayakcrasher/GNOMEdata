@@ -28,3 +28,6 @@ indexes/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local secrets
+.env
