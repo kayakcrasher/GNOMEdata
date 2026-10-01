@@ -299,6 +299,38 @@ class LumberYard:
             created_at=row["created_at"],
         )
 
+    def list_boards(
+        self,
+        collection_id: str = "default",
+    ) -> list[StoredBoard]:
+        """Return all boards belonging to one collection."""
+
+        collection_id = collection_id.strip()
+
+        if not collection_id:
+            raise ValueError(
+                "collection_id cannot be empty."
+            )
+
+        if self.get_collection(collection_id) is None:
+            raise KeyError(
+                f"unknown collection: {collection_id}"
+            )
+
+        rows = self._connection.execute("""
+            SELECT *
+            FROM boards
+            WHERE collection_id = ?
+            ORDER BY created_at, board_id
+        """, (
+            collection_id,
+        )).fetchall()
+
+        return [
+            self._to_board(row)
+            for row in rows
+        ]
+
     def add_board(
         self,
         board: Board,
