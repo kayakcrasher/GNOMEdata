@@ -72,6 +72,8 @@ from uuid import uuid4
 
 from app.rag.boards import Log
 from app.rag.pipeline import MillPipeline
+from app.core.query import LocalQueryEngine
+from app.rag.local_embedder import LocalHashEmbedder
 
 
 NonEmptyText = Annotated[
@@ -89,6 +91,17 @@ class IngestRequest(BaseModel):
     collection_id: NonEmptyText
     source_name: NonEmptyText
     text: NonEmptyText
+
+
+
+
+class QueryRequest(BaseModel):
+    """A question sent to the local GNOMEdata brain."""
+
+    question: NonEmptyText
+    collection_id: NonEmptyText = "default"
+    board_ids: list[str] | None = None
+    allow_online: bool = False
 
 
 @app.get(
@@ -319,7 +332,121 @@ def loading_dock() -> str:
         .error {
             color: #ffd0d0;
         }
-    </style>
+
+        .workspace {
+            margin-top: 28px;
+            padding-top: 24px;
+            border-top: 1px solid #34463a;
+        }
+
+        .workspace-header {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+        }
+
+        .workspace-header h2 {
+            margin: 0;
+        }
+
+        #workspace-summary {
+            margin-bottom: 0;
+            color: #b8c7bb;
+        }
+
+        .secondary-button {
+            width: auto;
+            margin: 0;
+            padding: 10px 14px;
+            border: 1px solid #526557;
+            background: #111813;
+            color: #edf4ed;
+        }
+
+        .board-grid {
+            display: grid;
+            grid-template-columns:
+                repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px;
+            margin-top: 20px;
+        }
+
+        .board-card {
+            position: relative;
+            padding: 16px;
+            border: 1px solid #415247;
+            border-radius: 12px;
+            background: #111813;
+        }
+
+        .board-card.selected {
+            border-color: #dce7dd;
+            background: #202c23;
+        }
+
+        .board-top {
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+            justify-content: space-between;
+        }
+
+        .board-source {
+            margin: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .board-grade {
+            display: inline-block;
+            margin-top: 8px;
+            padding: 4px 7px;
+            border: 1px solid #526557;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+        }
+
+        .board-preview {
+            color: #b8c7bb;
+            line-height: 1.45;
+        }
+
+        .board-select {
+            width: 22px;
+            height: 22px;
+            accent-color: #dce7dd;
+        }
+    
+        .query-panel {
+            margin-top: 30px;
+            padding-top: 24px;
+            border-top: 1px solid #34463a;
+        }
+
+        .query-panel textarea {
+            min-height: 110px;
+        }
+
+        .online-choice {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 14px;
+            color: #b8c7bb;
+        }
+
+        .online-choice input {
+            width: auto;
+        }
+
+        #query-result {
+            display: grid;
+            gap: 12px;
+            margin-top: 20px;
+        }
+</style>
 </head>
 
 <body>
@@ -406,6 +533,53 @@ def loading_dock() -> str:
         </section>
 
         <section id="result"></section>
+
+        <section id="workspace" class="workspace">
+            <div class="workspace-header">
+                <div>
+                    <h2>🌲 Collection Workspace</h2>
+                    <p id="workspace-summary">
+                        Loading lumber yard...
+                    </p>
+                </div>
+
+                <button
+                    id="refresh-workspace"
+                    type="button"
+                    class="secondary-button"
+                >
+                    REFRESH YARD
+                </button>
+            </div>
+
+            <div id="board-grid" class="board-grid"></div>
+
+            <div class="query-panel">
+                <h2>🧠 Ask the Yard</h2>
+
+                <textarea
+                    id="query-question"
+                    placeholder="Ask about the selected lumber..."
+                ></textarea>
+
+                <label class="online-choice">
+                    <input
+                        id="allow-online"
+                        type="checkbox"
+                    >
+                    Allow online assistance for this query
+                </label>
+
+                <button
+                    id="query-button"
+                    type="button"
+                >
+                    SEARCH THE YARD
+                </button>
+
+                <div id="query-result"></div>
+            </div>
+        </section>
     </section>
 </main>
 
@@ -543,6 +717,7 @@ function finishMill(body) {
             ${escapeHtml(body.log_id)}
         </div>
     `;
+    loadWorkspace();
 }
 
 function failMill(body) {
@@ -563,6 +738,230 @@ function escapeHtml(value) {
     element.textContent = String(value ?? "");
     return element.innerHTML;
 }
+
+
+const workspaceSummary =
+    document.getElementById("workspace-summary");
+
+const boardGrid =
+    document.getElementById("board-grid");
+
+const refreshWorkspace =
+    document.getElementById("refresh-workspace");
+
+
+async function loadWorkspace() {
+    const collectionId =
+        document.getElementById("collection").value.trim();
+
+    if (!collectionId) {
+        return;
+    }
+
+    workspaceSummary.textContent =
+        "Opening " + collectionId + "...";
+
+    try {
+        const response = await fetch(
+            "/api/collections/" +
+            encodeURIComponent(collectionId) +
+            "/boards"
+        );
+
+        const body = await response.json();
+
+        if (!response.ok) {
+            workspaceSummary.textContent =
+                "Collection unavailable.";
+
+            boardGrid.innerHTML = "";
+            return;
+        }
+
+        workspaceSummary.textContent =
+            body.name +
+            " — " +
+            body.total +
+            (body.total === 1 ? " board" : " boards");
+
+        boardGrid.innerHTML = "";
+
+        if (body.boards.length === 0) {
+            boardGrid.innerHTML =
+                '<p class="subtitle">' +
+                'No lumber stored yet.' +
+                '</p>';
+
+            return;
+        }
+
+        for (const board of body.boards) {
+            const card = document.createElement("article");
+            card.className = "board-card selected";
+
+            const preview =
+                board.text.length > 180
+                    ? board.text.slice(0, 180) + "..."
+                    : board.text;
+
+            card.innerHTML = `
+                <div class="board-top">
+                    <div>
+                        <h3 class="board-source">
+                            📄 ${escapeHtml(board.source_name)}
+                        </h3>
+
+                        <span class="board-grade">
+                            ${escapeHtml(board.grade)}
+                        </span>
+                    </div>
+
+                    <input
+                        class="board-select"
+                        type="checkbox"
+                        checked
+                        data-board-id="${escapeHtml(board.board_id)}"
+                        aria-label="Select board"
+                    >
+                </div>
+
+                <p class="board-preview">
+                    ${escapeHtml(preview)}
+                </p>
+            `;
+
+            const checkbox =
+                card.querySelector(".board-select");
+
+            checkbox.addEventListener("change", () => {
+                card.classList.toggle(
+                    "selected",
+                    checkbox.checked
+                );
+            });
+
+            boardGrid.appendChild(card);
+        }
+    } catch (error) {
+        workspaceSummary.textContent =
+            "Unable to load Lumber Yard.";
+
+        boardGrid.innerHTML = "";
+    }
+}
+
+
+refreshWorkspace.addEventListener(
+    "click",
+    loadWorkspace
+);
+
+
+const queryButton =
+    document.getElementById("query-button");
+
+const queryResult =
+    document.getElementById("query-result");
+
+
+queryButton.addEventListener("click", async () => {
+    const question =
+        document.getElementById("query-question")
+            .value
+            .trim();
+
+    if (!question) {
+        queryResult.textContent =
+            "Give the Yard a question first.";
+        return;
+    }
+
+    const selectedBoards = Array.from(
+        document.querySelectorAll(
+            ".board-select:checked"
+        )
+    ).map(
+        checkbox => checkbox.dataset.boardId
+    );
+
+    const collectionId =
+        document.getElementById("collection")
+            .value
+            .trim();
+
+    queryResult.textContent =
+        "Searching local lumber...";
+
+    const response = await fetch(
+        "/api/query",
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                question: question,
+                collection_id: collectionId,
+                board_ids: selectedBoards,
+                allow_online:
+                    document.getElementById(
+                        "allow-online"
+                    ).checked
+            })
+        }
+    );
+
+    const body = await response.json();
+
+    if (!response.ok) {
+        queryResult.textContent =
+            "Query failed:\n" +
+            JSON.stringify(body, null, 2);
+        return;
+    }
+
+    queryResult.innerHTML = "";
+
+    const status = document.createElement("p");
+
+    status.textContent =
+        body.online_used
+            ? "Online assistance used."
+            : "LOCAL ONLY • No online assistance used.";
+
+    queryResult.appendChild(status);
+
+    if (!body.evidence.length) {
+        const empty = document.createElement("p");
+        empty.textContent =
+            "No matching evidence found.";
+        queryResult.appendChild(empty);
+        return;
+    }
+
+    for (const evidence of body.evidence) {
+        const card = document.createElement("article");
+        card.className = "board-card";
+
+        const title = document.createElement("h3");
+        title.textContent =
+            "📄 " + evidence.source_name;
+
+        const score = document.createElement("p");
+        score.textContent =
+            "Relevance: " +
+            evidence.score.toFixed(3);
+
+        const text = document.createElement("p");
+        text.textContent = evidence.text;
+
+        card.appendChild(title);
+        card.appendChild(score);
+        card.appendChild(text);
+
+        queryResult.appendChild(card);
+    }
+});
 
 form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -701,5 +1100,62 @@ def collection_boards(
                 "end_offset": board.end_offset,
             }
             for board in boards
+        ],
+    }
+
+
+@app.post(
+    "/api/query",
+    tags=["query"],
+)
+def query_yard(
+    request: QueryRequest,
+) -> dict:
+    """Search GNOMEdata locally and return ranked evidence."""
+
+    yard = getattr(app.state, "yard", None)
+
+    if yard is None:
+        raise RuntimeError(
+            "GNOMEdata Lumber Yard is not configured."
+        )
+
+    # Local is always the default query path.
+    embedder = LocalHashEmbedder()
+
+    engine = LocalQueryEngine(
+        yard=yard,
+        embedder=embedder,
+    )
+
+    try:
+        result = engine.query(
+            question=request.question,
+            collection_id=request.collection_id,
+            board_ids=(
+                set(request.board_ids)
+                if request.board_ids is not None
+                else None
+            ),
+            allow_online=request.allow_online,
+        )
+    except KeyError as error:
+        raise HTTPException(
+            status_code=404,
+            detail=str(error),
+        ) from error
+
+    return {
+        "question": result.question,
+        "collection_id": result.collection_id,
+        "online_used": result.online_used,
+        "evidence": [
+            {
+                "board_id": item.board_id,
+                "source_name": item.source_name,
+                "text": item.text,
+                "score": item.score,
+            }
+            for item in result.evidence
         ],
     }

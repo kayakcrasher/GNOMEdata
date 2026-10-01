@@ -205,3 +205,41 @@ def test_collection_workspace_rejects_unknown_collection() -> None:
         )
 
         assert response.status_code == 404
+
+
+def test_local_query_api_returns_evidence() -> None:
+    with TestClient(app) as query_client:
+        ingest = query_client.post(
+            "/api/ingest",
+            json={
+                "collection_id": "default",
+                "source_name": "RandyRecords",
+                "text": (
+                    "Randy sells pies from his home in Oakville. "
+                    "His dog is named Tom."
+                ),
+            },
+        )
+
+        assert ingest.status_code == 200
+
+        response = query_client.post(
+            "/api/query",
+            json={
+                "question": "Where does Randy sell pies?",
+                "collection_id": "default",
+                "allow_online": False,
+            },
+        )
+
+        assert response.status_code == 200
+
+        body = response.json()
+
+        assert body["online_used"] is False
+        assert body["evidence"]
+
+        assert any(
+            item["source_name"] == "RandyRecords"
+            for item in body["evidence"]
+        )
