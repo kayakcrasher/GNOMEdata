@@ -26,10 +26,20 @@ from app.rag.vector_search import VectorBoard, search_vectors
 
 
 @dataclass(frozen=True)
+class Collection:
+    """A named collection of related lumber."""
+
+    collection_id: str
+    name: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class StoredBoard:
     """A board recovered from the Lumber Yard."""
 
     board_id: str
+    collection_id: str
     log_id: str
     source_name: str
     text: str
@@ -77,6 +87,7 @@ class LumberYard:
         self._connection.row_factory = sqlite3.Row
 
         self._create_schema()
+        self._migrate_collections()
 
     def _create_schema(self) -> None:
         """Create Lumber Yard tables and indexes."""
@@ -143,10 +154,114 @@ class LumberYard:
                 ON board_embeddings(model)
             """)
 
+    def _migrate_collections(self) -> None:
+        """Upgrade old Lumber Yard databases to collection-aware storage."""
+
+        with self._connection:
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS collections (
+                    collection_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            self._connection.execute("""
+                INSERT OR IGNORE INTO collections (
+                    collection_id,
+                    name
+                )
+                VALUES ('default', 'Default')
+            """)
+
+            columns = {
+                row["name"]
+                for row in self._connection.execute(
+                    "PRAGMA table_info(boards)"
+                ).fetchall()
+            }
+
+            if "collection_id" not in columns:
+                self._connection.execute("""
+                    ALTER TABLE boards
+                    ADD COLUMN collection_id TEXT
+                    NOT NULL DEFAULT 'default'
+                """)
+
+            self._connection.execute("""
+                CREATE INDEX IF NOT EXISTS
+                    idx_boards_collection
+                ON boards(collection_id)
+            """)
+
+    def create_collection(
+        self,
+        collection_id: str,
+        name: str,
+    ) -> None:
+        """Create or update a named lumber collection."""
+
+        collection_id = collection_id.strip()
+        name = name.strip()
+
+        if not collection_id:
+            raise ValueError(
+                "collection_id cannot be empty."
+            )
+
+        if not name:
+            raise ValueError(
+                "collection name cannot be empty."
+            )
+
+        with self._connection:
+            self._connection.execute("""
+                INSERT INTO collections (
+                    collection_id,
+                    name
+                )
+                VALUES (?, ?)
+
+                ON CONFLICT(collection_id)
+                DO UPDATE SET
+                    name = excluded.name
+            """, (
+                collection_id,
+                name,
+            ))
+
+    def get_collection(
+        self,
+        collection_id: str,
+    ) -> Collection | None:
+        """Retrieve one lumber collection."""
+
+        row = self._connection.execute("""
+            SELECT
+                collection_id,
+                name,
+                created_at
+            FROM collections
+            WHERE collection_id = ?
+        """, (
+            collection_id,
+        )).fetchone()
+
+        if row is None:
+            return None
+
+        return Collection(
+            collection_id=row["collection_id"],
+            name=row["name"],
+            created_at=row["created_at"],
+        )
+
     def add_board(
         self,
         board: Board,
         inspection: Inspection,
+        collection_id: str = "default",
     ) -> None:
         """Store a board and its inspection result."""
 
@@ -178,6 +293,18 @@ class LumberYard:
                 "inspection must contain a valid Grade."
             )
 
+        collection_id = collection_id.strip()
+
+        if not collection_id:
+            raise ValueError(
+                "collection_id cannot be empty."
+            )
+
+        if self.get_collection(collection_id) is None:
+            raise KeyError(
+                f"unknown collection: {collection_id}"
+            )
+
         with self._connection:
             self._connection.execute("""
                 INSERT INTO boards (
@@ -188,9 +315,10 @@ class LumberYard:
                     start_offset,
                     end_offset,
                     grade,
-                    reasons_json
+                    reasons_json,
+                    collection_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 
                 ON CONFLICT(board_id)
                 DO UPDATE SET
@@ -200,7 +328,8 @@ class LumberYard:
                     start_offset = excluded.start_offset,
                     end_offset = excluded.end_offset,
                     grade = excluded.grade,
-                    reasons_json = excluded.reasons_json
+                    reasons_json = excluded.reasons_json,
+                    collection_id = excluded.collection_id
             """, (
                 board.board_id,
                 board.log_id,
@@ -212,6 +341,7 @@ class LumberYard:
                 json.dumps(
                     inspection.reasons
                 ),
+                collection_id,
             ))
 
     def add_embedding(
@@ -328,6 +458,7 @@ class LumberYard:
         query: str,
         limit: int = 5,
         include_review: bool = False,
+        collection_id: str = "default",
     ) -> list[SearchResult]:
         """Retrieve boards by lexical relevance."""
 
@@ -346,7 +477,8 @@ class LumberYard:
         )
 
         rows = self._searchable_rows(
-            include_review
+            include_review,
+            collection_id,
         )
 
         results: list[SearchResult] = []
@@ -420,6 +552,7 @@ class LumberYard:
         limit: int = 5,
         minimum_similarity: float = -1.0,
         include_review: bool = False,
+        collection_id: str = "default",
     ) -> list[SearchResult]:
         """Retrieve boards from the Lumber Yard by vector similarity."""
 
@@ -438,12 +571,14 @@ class LumberYard:
             JOIN board_embeddings AS e
                 ON e.board_id = b.board_id
             WHERE e.model = ?
+              AND b.collection_id = ?
               AND b.grade IN (
                   'accept',
                   ?
               )
         """, (
             query.model,
+            collection_id,
             (
                 "review"
                 if include_review
@@ -531,6 +666,7 @@ class LumberYard:
     def _searchable_rows(
         self,
         include_review: bool,
+        collection_id: str = "default",
     ) -> list[sqlite3.Row]:
         """Return boards eligible for retrieval."""
 
@@ -538,17 +674,23 @@ class LumberYard:
             return self._connection.execute("""
                 SELECT *
                 FROM boards
-                WHERE grade IN (
-                    'accept',
-                    'review'
-                )
-            """).fetchall()
+                WHERE collection_id = ?
+                  AND grade IN (
+                      'accept',
+                      'review'
+                  )
+            """, (
+                collection_id,
+            )).fetchall()
 
         return self._connection.execute("""
             SELECT *
             FROM boards
-            WHERE grade = 'accept'
-        """).fetchall()
+            WHERE collection_id = ?
+              AND grade = 'accept'
+        """, (
+            collection_id,
+        )).fetchall()
 
     def close(self) -> None:
         """Close the database connection."""
@@ -573,6 +715,7 @@ class LumberYard:
 
         return StoredBoard(
             board_id=row["board_id"],
+            collection_id=row["collection_id"],
             log_id=row["log_id"],
             source_name=row["source_name"],
             text=row["text"],
