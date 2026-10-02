@@ -302,6 +302,33 @@ class LumberYard:
             created_at=row["created_at"],
         )
 
+    def clear_collection(
+        self,
+        collection_id: str,
+    ) -> int:
+        """Remove all lumber from a collection and return the number removed."""
+
+        collection_id = collection_id.strip()
+
+        if not collection_id:
+            raise ValueError(
+                "collection_id cannot be empty."
+            )
+
+        if self.get_collection(collection_id) is None:
+            raise KeyError(
+                f"unknown collection: {collection_id}"
+            )
+
+        with self._connection:
+            cursor = self._connection.execute(
+                "DELETE FROM boards WHERE collection_id = ?",
+                (collection_id,),
+            )
+
+        return cursor.rowcount
+
+
     def list_boards(
         self,
         collection_id: str = "default",
