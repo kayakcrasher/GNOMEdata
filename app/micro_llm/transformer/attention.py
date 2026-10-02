@@ -1,6 +1,19 @@
-"""Causal self-attention primitives for GNOME Micro."""
+"""Causal self-attention with explicit NumPy backprop."""
+
+from dataclasses import dataclass
 
 import numpy as np
+
+
+@dataclass
+class AttentionCache:
+    """Values required for attention backward."""
+
+    query: np.ndarray
+    key: np.ndarray
+    value: np.ndarray
+    weights: np.ndarray
+    scale: float
 
 
 def softmax(
@@ -23,7 +36,7 @@ def softmax(
 
 
 def causal_mask(length: int) -> np.ndarray:
-    """Mask future positions from attention."""
+    """Return True where future attention is forbidden."""
 
     if length < 1:
         raise ValueError(
@@ -43,7 +56,8 @@ def scaled_dot_product_attention(
     query: np.ndarray,
     key: np.ndarray,
     value: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+    return_cache: bool = False,
+):
     """Perform causal scaled dot-product attention."""
 
     if query.shape != key.shape:
@@ -58,9 +72,16 @@ def scaled_dot_product_attention(
 
     depth = query.shape[-1]
 
+    scale = 1.0 / np.sqrt(depth)
+
     scores = (
-        query @ np.swapaxes(key, -1, -2)
-    ) / np.sqrt(depth)
+        query
+        @ np.swapaxes(
+            key,
+            -1,
+            -2,
+        )
+    ) * scale
 
     length = query.shape[-2]
 
@@ -79,4 +100,101 @@ def scaled_dot_product_attention(
 
     output = weights @ value
 
-    return output, weights
+    if not return_cache:
+        return output, weights
+
+    cache = AttentionCache(
+        query=query,
+        key=key,
+        value=value,
+        weights=weights,
+        scale=scale,
+    )
+
+    return output, weights, cache
+
+
+def scaled_dot_product_attention_backward(
+    grad_output: np.ndarray,
+    cache: AttentionCache,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    """Backpropagate through causal attention."""
+
+    query = cache.query
+    key = cache.key
+    value = cache.value
+    weights = cache.weights
+    scale = cache.scale
+
+    # output = weights @ value
+    grad_weights = (
+        grad_output
+        @ np.swapaxes(
+            value,
+            -1,
+            -2,
+        )
+    )
+
+    grad_value = (
+        np.swapaxes(
+            weights,
+            -1,
+            -2,
+        )
+        @ grad_output
+    )
+
+    # Softmax Jacobian-vector product:
+    #
+    # dS = P * (dP - sum(dP * P))
+    correction = np.sum(
+        grad_weights * weights,
+        axis=-1,
+        keepdims=True,
+    )
+
+    grad_scores = (
+        weights
+        * (
+            grad_weights
+            - correction
+        )
+    )
+
+    # Masked probabilities are exactly zero, so their
+    # score gradients should remain zero as well.
+    length = query.shape[-2]
+
+    mask = causal_mask(length)
+
+    grad_scores = np.where(
+        mask,
+        0.0,
+        grad_scores,
+    )
+
+    # scores = (query @ key.T) * scale
+    grad_query = (
+        grad_scores
+        @ key
+    ) * scale
+
+    grad_key = (
+        np.swapaxes(
+            grad_scores,
+            -1,
+            -2,
+        )
+        @ query
+    ) * scale
+
+    return (
+        grad_query,
+        grad_key,
+        grad_value,
+    )
