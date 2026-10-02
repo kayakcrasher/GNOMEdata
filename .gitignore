@@ -34,3 +34,7 @@ Thumbs.db
 
 # Local code surgery backups
 *.bak
+
+# Generated MicroLLM checkpoints
+models/*.npz
+models/*.json
