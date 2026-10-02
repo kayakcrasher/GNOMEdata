@@ -93,6 +93,9 @@ class LumberYard:
         )
         self._connection.row_factory = sqlite3.Row
 
+        # Enforce foreign keys and ON DELETE CASCADE.
+        self._connection.execute("PRAGMA foreign_keys = ON")
+
         self._create_schema()
         self._migrate_collections()
         self._create_stack_schema()

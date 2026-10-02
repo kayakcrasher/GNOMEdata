@@ -6,7 +6,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class TransformerConfig:
     vocab_size: int = 256
-    context_size: int = 32
+    context_size: int = 512
 
     # Keep v0.4 small enough for phone experiments.
     d_model: int = 64
