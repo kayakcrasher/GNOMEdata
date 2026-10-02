@@ -1409,6 +1409,17 @@ def query_yard(
         "question": result.question,
         "collection_id": result.collection_id,
         "online_used": result.online_used,
+        "answer": result.answer,
+        "facts": [
+            {
+                "subject": fact.subject,
+                "relation": fact.relation,
+                "value": fact.value,
+                "source_name": fact.source_name,
+                "board_id": fact.board_id,
+            }
+            for fact in result.facts
+        ],
         "evidence": [
             {
                 "board_id": item.board_id,
