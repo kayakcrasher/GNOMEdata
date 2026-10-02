@@ -1,0 +1,142 @@
+"""GNOME Micro v0.4 causal Transformer language model."""
+
+import numpy as np
+
+from app.micro_llm.transformer.block import TransformerBlock
+from app.micro_llm.transformer.config import TransformerConfig
+from app.micro_llm.transformer.embeddings import TransformerEmbeddings
+
+
+class TransformerLanguageModel:
+    """Tiny causal Transformer for next-byte prediction."""
+
+    def __init__(
+        self,
+        config: TransformerConfig | None = None,
+    ) -> None:
+        self.config = config or TransformerConfig()
+
+        self.rng = np.random.default_rng(
+            self.config.seed
+        )
+
+        self.embeddings = TransformerEmbeddings(
+            self.config,
+            self.rng,
+        )
+
+        self.blocks = [
+            TransformerBlock(
+                self.config,
+                self.rng,
+            )
+            for _ in range(
+                self.config.num_layers
+            )
+        ]
+
+        d = self.config.d_model
+
+        self.lm_head = (
+            self.rng.standard_normal(
+                (
+                    d,
+                    self.config.vocab_size,
+                )
+            ).astype(np.float32)
+            * (1.0 / np.sqrt(d))
+        )
+
+        self.lm_bias = np.zeros(
+            self.config.vocab_size,
+            dtype=np.float32,
+        )
+
+    @property
+    def parameter_count(self) -> int:
+        return (
+            self.embeddings.parameter_count
+            + sum(
+                block.parameter_count
+                for block in self.blocks
+            )
+            + self.lm_head.size
+            + self.lm_bias.size
+        )
+
+    def forward(
+        self,
+        tokens: np.ndarray,
+    ) -> np.ndarray:
+        """Return logits for every sequence position."""
+
+        if tokens.ndim != 2:
+            raise ValueError(
+                "tokens must have shape "
+                "(batch, sequence)."
+            )
+
+        if tokens.shape[1] > self.config.context_size:
+            raise ValueError(
+                "sequence exceeds context window."
+            )
+
+        x = self.embeddings.forward(tokens)
+
+        for block in self.blocks:
+            x, _ = block.forward(x)
+
+        return (
+            x @ self.lm_head
+            + self.lm_bias
+        )
+
+    @staticmethod
+    def cross_entropy(
+        logits: np.ndarray,
+        targets: np.ndarray,
+    ) -> float:
+        """Mean next-token cross-entropy."""
+
+        shifted = logits - np.max(
+            logits,
+            axis=-1,
+            keepdims=True,
+        )
+
+        log_sum_exp = np.log(
+            np.sum(
+                np.exp(shifted),
+                axis=-1,
+            )
+        )
+
+        target_logits = np.take_along_axis(
+            shifted,
+            targets[..., None],
+            axis=-1,
+        )[..., 0]
+
+        losses = (
+            log_sum_exp
+            - target_logits
+        )
+
+        return float(losses.mean())
+
+    def loss(
+        self,
+        inputs: np.ndarray,
+        targets: np.ndarray,
+    ) -> float:
+        logits = self.forward(inputs)
+
+        if targets.shape != inputs.shape:
+            raise ValueError(
+                "targets must match input shape."
+            )
+
+        return self.cross_entropy(
+            logits,
+            targets,
+        )

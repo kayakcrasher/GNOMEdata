@@ -1,11 +1,19 @@
-"""Transformer block for GNOME Micro v0.4."""
+"""Trainable Transformer block for GNOME Micro v0.4."""
+
+from dataclasses import dataclass
 
 import numpy as np
 
-from app.micro_llm.transformer.attention import (
-    scaled_dot_product_attention,
-)
 from app.micro_llm.transformer.config import TransformerConfig
+from app.micro_llm.transformer.multihead import (
+    MultiHeadAttention,
+    MultiHeadCache,
+)
+from app.micro_llm.transformer.norm import (
+    LayerNormCache,
+    layer_norm_backward,
+    layer_norm_forward,
+)
 
 
 def layer_norm(
@@ -14,28 +22,38 @@ def layer_norm(
     beta: np.ndarray,
     epsilon: float = 1e-5,
 ) -> np.ndarray:
-    """Normalize each token across its feature dimension."""
+    """Compatibility wrapper for existing tests."""
 
-    mean = x.mean(
-        axis=-1,
-        keepdims=True,
+    output, _ = layer_norm_forward(
+        x,
+        gamma,
+        beta,
+        epsilon,
     )
 
-    variance = x.var(
-        axis=-1,
-        keepdims=True,
-    )
+    return output
 
-    normalized = (
-        (x - mean)
-        / np.sqrt(variance + epsilon)
-    )
 
-    return normalized * gamma + beta
+@dataclass
+class BlockCache:
+    """Values required for Transformer block backward."""
+
+    x: np.ndarray
+
+    attention_output: np.ndarray
+    attention_cache: MultiHeadCache
+
+    norm1: np.ndarray
+    norm1_cache: LayerNormCache
+
+    hidden_pre: np.ndarray
+    hidden: np.ndarray
+
+    norm2_cache: LayerNormCache
 
 
 class TransformerBlock:
-    """One causal Transformer block."""
+    """One trainable causal Transformer block."""
 
     def __init__(
         self,
@@ -47,31 +65,30 @@ class TransformerBlock:
         d = config.d_model
         ff = config.d_ff
 
+        self.attention = MultiHeadAttention(
+            config,
+            rng,
+        )
+
         scale = 1.0 / np.sqrt(d)
 
-        def matrix(
-            rows: int,
-            columns: int,
-        ) -> np.ndarray:
-            return (
-                rng.standard_normal(
-                    (rows, columns)
-                ).astype(np.float32)
-                * scale
-            )
+        self.w1 = (
+            rng.standard_normal((d, ff))
+            .astype(np.float32)
+            * scale
+        )
 
-        self.wq = matrix(d, d)
-        self.wk = matrix(d, d)
-        self.wv = matrix(d, d)
-        self.wo = matrix(d, d)
-
-        self.w1 = matrix(d, ff)
         self.b1 = np.zeros(
             ff,
             dtype=np.float32,
         )
 
-        self.w2 = matrix(ff, d)
+        self.w2 = (
+            rng.standard_normal((ff, d))
+            .astype(np.float32)
+            * scale
+        )
+
         self.b2 = np.zeros(
             d,
             dtype=np.float32,
@@ -97,83 +114,54 @@ class TransformerBlock:
             dtype=np.float32,
         )
 
-    def _split_heads(
-        self,
-        x: np.ndarray,
-    ) -> np.ndarray:
-        batch, length, _ = x.shape
+    # Compatibility with the original block API.
+    @property
+    def wq(self) -> np.ndarray:
+        return self.attention.wq
 
-        x = x.reshape(
-            batch,
-            length,
-            self.config.num_heads,
-            self.config.head_size,
-        )
+    @property
+    def wk(self) -> np.ndarray:
+        return self.attention.wk
 
-        return x.transpose(
-            0,
-            2,
-            1,
-            3,
-        )
+    @property
+    def wv(self) -> np.ndarray:
+        return self.attention.wv
 
-    def _merge_heads(
-        self,
-        x: np.ndarray,
-    ) -> np.ndarray:
-        batch, heads, length, depth = x.shape
-
-        return (
-            x.transpose(0, 2, 1, 3)
-            .reshape(
-                batch,
-                length,
-                heads * depth,
-            )
-        )
+    @property
+    def wo(self) -> np.ndarray:
+        return self.attention.wo
 
     def forward(
         self,
         x: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Run one Transformer block."""
+        return_cache: bool = False,
+    ):
+        """Run the Transformer block."""
 
-        q = self._split_heads(
-            x @ self.wq
+        attention_output, attention_cache = (
+            self.attention.forward(x)
         )
 
-        k = self._split_heads(
-            x @ self.wk
+        residual1 = (
+            x + attention_output
         )
 
-        v = self._split_heads(
-            x @ self.wv
-        )
-
-        attention_output, weights = (
-            scaled_dot_product_attention(
-                q,
-                k,
-                v,
+        norm1, norm1_cache = (
+            layer_norm_forward(
+                residual1,
+                self.ln1_gamma,
+                self.ln1_beta,
             )
         )
 
-        attention_output = (
-            self._merge_heads(
-                attention_output
-            )
-            @ self.wo
-        )
-
-        x = layer_norm(
-            x + attention_output,
-            self.ln1_gamma,
-            self.ln1_beta,
+        hidden_pre = (
+            norm1 @ self.w1
+            + self.b1
         )
 
         hidden = np.maximum(
+            hidden_pre,
             0.0,
-            x @ self.w1 + self.b1,
         )
 
         feed_forward = (
@@ -181,32 +169,184 @@ class TransformerBlock:
             + self.b2
         )
 
-        x = layer_norm(
-            x + feed_forward,
-            self.ln2_gamma,
-            self.ln2_beta,
+        residual2 = (
+            norm1 + feed_forward
         )
 
-        return x, weights
+        output, norm2_cache = (
+            layer_norm_forward(
+                residual2,
+                self.ln2_gamma,
+                self.ln2_beta,
+            )
+        )
+
+        if return_cache:
+            cache = BlockCache(
+                x=x,
+                attention_output=attention_output,
+                attention_cache=attention_cache,
+                norm1=norm1,
+                norm1_cache=norm1_cache,
+                hidden_pre=hidden_pre,
+                hidden=hidden,
+                norm2_cache=norm2_cache,
+            )
+
+            return output, cache
+
+        # Preserve old API:
+        # second result used to be attention weights.
+        return output, attention_cache.attention.weights
+
+    def backward(
+        self,
+        grad_output: np.ndarray,
+        cache: BlockCache,
+    ) -> tuple[
+        np.ndarray,
+        dict[str, np.ndarray],
+    ]:
+        """Backpropagate through the entire block."""
+
+        # ---- LayerNorm #2 ----
+
+        (
+            grad_residual2,
+            grad_ln2_gamma,
+            grad_ln2_beta,
+        ) = layer_norm_backward(
+            grad_output,
+            cache.norm2_cache,
+        )
+
+        # residual2 = norm1 + feed_forward
+        grad_norm1 = grad_residual2.copy()
+        grad_feed_forward = grad_residual2
+
+        # ---- W2 ----
+
+        flat_hidden = cache.hidden.reshape(
+            -1,
+            self.config.d_ff,
+        )
+
+        flat_grad_ff = grad_feed_forward.reshape(
+            -1,
+            self.config.d_model,
+        )
+
+        grad_w2 = (
+            flat_hidden.T
+            @ flat_grad_ff
+        )
+
+        grad_b2 = np.sum(
+            flat_grad_ff,
+            axis=0,
+        )
+
+        grad_hidden = (
+            grad_feed_forward
+            @ self.w2.T
+        )
+
+        # ---- ReLU ----
+
+        grad_hidden_pre = (
+            grad_hidden
+            * (
+                cache.hidden_pre > 0.0
+            )
+        )
+
+        # ---- W1 ----
+
+        flat_norm1 = cache.norm1.reshape(
+            -1,
+            self.config.d_model,
+        )
+
+        flat_grad_hidden_pre = (
+            grad_hidden_pre.reshape(
+                -1,
+                self.config.d_ff,
+            )
+        )
+
+        grad_w1 = (
+            flat_norm1.T
+            @ flat_grad_hidden_pre
+        )
+
+        grad_b1 = np.sum(
+            flat_grad_hidden_pre,
+            axis=0,
+        )
+
+        grad_norm1 += (
+            grad_hidden_pre
+            @ self.w1.T
+        )
+
+        # ---- LayerNorm #1 ----
+
+        (
+            grad_residual1,
+            grad_ln1_gamma,
+            grad_ln1_beta,
+        ) = layer_norm_backward(
+            grad_norm1,
+            cache.norm1_cache,
+        )
+
+        # residual1 = x + attention(x)
+        grad_x = grad_residual1.copy()
+        grad_attention_output = (
+            grad_residual1
+        )
+
+        # ---- Multi-head attention ----
+
+        (
+            grad_attention_input,
+            attention_grads,
+        ) = self.attention.backward(
+            grad_attention_output,
+            cache.attention_cache,
+        )
+
+        grad_x += grad_attention_input
+
+        gradients = {
+            "wq": attention_grads["wq"],
+            "wk": attention_grads["wk"],
+            "wv": attention_grads["wv"],
+            "wo": attention_grads["wo"],
+
+            "w1": grad_w1,
+            "b1": grad_b1,
+            "w2": grad_w2,
+            "b2": grad_b2,
+
+            "ln1_gamma": grad_ln1_gamma,
+            "ln1_beta": grad_ln1_beta,
+            "ln2_gamma": grad_ln2_gamma,
+            "ln2_beta": grad_ln2_beta,
+        }
+
+        return grad_x, gradients
 
     @property
     def parameter_count(self) -> int:
-        arrays = (
-            self.wq,
-            self.wk,
-            self.wv,
-            self.wo,
-            self.w1,
-            self.b1,
-            self.w2,
-            self.b2,
-            self.ln1_gamma,
-            self.ln1_beta,
-            self.ln2_gamma,
-            self.ln2_beta,
-        )
-
-        return sum(
-            array.size
-            for array in arrays
+        return (
+            self.attention.parameter_count
+            + self.w1.size
+            + self.b1.size
+            + self.w2.size
+            + self.b2.size
+            + self.ln1_gamma.size
+            + self.ln1_beta.size
+            + self.ln2_gamma.size
+            + self.ln2_beta.size
         )
