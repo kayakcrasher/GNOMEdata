@@ -2,9 +2,12 @@
 """GNOMEdata API application."""
 
 from contextlib import asynccontextmanager
+import hashlib
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 
 from app.rag.local_embedder import LocalHashEmbedder
 from app.rag.yard import LumberYard
@@ -21,6 +24,7 @@ async def lifespan(app: FastAPI):
 
     app.state.yard = yard
     app.state.embedder = embedder
+    app.state.llm = MicroLLM()
 
     try:
         yield
@@ -55,6 +59,12 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+app.mount(
+    "/static",
+    StaticFiles(directory="app/static"),
+    name="static",
+)
+
 # ---------------------------------------------------------------------------
 # Loading Dock
 # ---------------------------------------------------------------------------
@@ -69,6 +79,7 @@ from uuid import uuid4
 from app.rag.boards import Log
 from app.rag.pipeline import MillPipeline
 from app.core.query import LocalQueryEngine
+from app.llm import MicroLLM
 
 
 NonEmptyText = Annotated[
@@ -90,6 +101,14 @@ class IngestRequest(BaseModel):
 
 
 
+class ChatRequest(BaseModel):
+    """Message sent to the local GNOME."""
+
+    message: NonEmptyText
+    collection_id: NonEmptyText = "default"
+    limit: int = 4
+
+
 class QueryRequest(BaseModel):
     """A question sent to the local GNOMEdata brain."""
 
@@ -107,1168 +126,7 @@ class QueryRequest(BaseModel):
 def loading_dock() -> str:
     """Serve the human-facing GNOMEdata Loading Dock."""
 
-    return """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
-
-    <title>GNOMEdata Loading Dock</title>
-
-    <style>
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            margin: 0;
-            min-height: 100vh;
-            font-family: system-ui, sans-serif;
-            background: #111813;
-            color: #edf4ed;
-        }
-
-        main {
-            width: min(900px, 92%);
-            margin: auto;
-            padding: 48px 0;
-        }
-
-        .panel {
-            padding: 28px;
-            border: 1px solid #34463a;
-            border-radius: 16px;
-            background: #1b251e;
-        }
-
-        h1 {
-            margin-top: 0;
-        }
-
-        .subtitle {
-            color: #b8c7bb;
-        }
-
-        label {
-            display: block;
-            margin: 18px 0 6px;
-            font-weight: 700;
-        }
-
-        input,
-        textarea,
-        button {
-            width: 100%;
-            font: inherit;
-            border-radius: 8px;
-        }
-
-        input,
-        textarea {
-            padding: 12px;
-            border: 1px solid #526557;
-            background: #0e1510;
-            color: #edf4ed;
-        }
-
-        textarea {
-            min-height: 220px;
-            resize: vertical;
-        }
-
-        button {
-            margin-top: 20px;
-            padding: 14px;
-            border: 0;
-            cursor: pointer;
-            font-weight: 800;
-        }
-
-        button:disabled {
-            cursor: wait;
-            opacity: 0.65;
-        }
-
-        .mill {
-            display: none;
-            margin-top: 30px;
-            padding: 22px;
-            border: 1px solid #34463a;
-            border-radius: 14px;
-            background: #101712;
-        }
-
-        .mill.running,
-        .mill.finished,
-        .mill.failed {
-            display: block;
-        }
-
-        .document {
-            width: 54px;
-            height: 66px;
-            margin: 0 auto 18px;
-            padding-top: 13px;
-            border: 2px solid #dce7dd;
-            border-radius: 5px;
-            text-align: center;
-            font-size: 26px;
-            background: #e8efe9;
-            color: #172019;
-            transition:
-                transform 0.35s ease,
-                opacity 0.35s ease;
-        }
-
-        .document.moving {
-            transform: translateY(8px) rotate(2deg);
-        }
-
-        .stations {
-            display: grid;
-            gap: 9px;
-        }
-
-        .station {
-            padding: 12px 14px;
-            border: 1px solid #34463a;
-            border-radius: 8px;
-            color: #829087;
-            transition:
-                transform 0.25s ease,
-                background 0.25s ease,
-                border-color 0.25s ease,
-                color 0.25s ease;
-        }
-
-        .station.active {
-            transform: scale(1.02);
-            border-color: #d7e6da;
-            background: #263329;
-            color: #ffffff;
-        }
-
-        .station.done {
-            border-color: #526b59;
-            color: #bcd0c0;
-        }
-
-        .station.done::after {
-            content: "  ✓";
-        }
-
-        .progress-shell {
-            height: 12px;
-            margin-top: 18px;
-            overflow: hidden;
-            border-radius: 999px;
-            background: #29342c;
-        }
-
-        .progress-bar {
-            width: 0%;
-            height: 100%;
-            background: #dce7dd;
-            transition: width 0.35s ease;
-        }
-
-        .mill-status {
-            margin-top: 12px;
-            text-align: center;
-            color: #b8c7bb;
-        }
-
-        #result {
-            display: none;
-            margin-top: 22px;
-            padding: 18px;
-            border: 1px solid #415247;
-            border-radius: 10px;
-            background: #111813;
-        }
-
-        #result.visible {
-            display: block;
-        }
-
-        .result-title {
-            margin: 0 0 16px;
-        }
-
-        .metrics {
-            display: grid;
-            grid-template-columns:
-                repeat(auto-fit, minmax(120px, 1fr));
-            gap: 10px;
-            margin: 16px 0;
-        }
-
-        .metric {
-            padding: 12px;
-            border: 1px solid #34463a;
-            border-radius: 8px;
-        }
-
-        .metric strong {
-            display: block;
-            font-size: 1.5rem;
-        }
-
-        .meta {
-            overflow-wrap: anywhere;
-            color: #b8c7bb;
-        }
-
-        .error {
-            color: #ffd0d0;
-        }
-
-        .workspace {
-            margin-top: 28px;
-            padding-top: 24px;
-            border-top: 1px solid #34463a;
-        }
-
-        .workspace-header {
-            display: flex;
-            gap: 16px;
-            align-items: center;
-            justify-content: space-between;
-            flex-wrap: wrap;
-        }
-
-        .workspace-header h2 {
-            margin: 0;
-        }
-
-        #workspace-summary {
-            margin-bottom: 0;
-            color: #b8c7bb;
-        }
-
-        .secondary-button {
-            width: auto;
-            margin: 0;
-            padding: 10px 14px;
-            border: 1px solid #526557;
-            background: #111813;
-            color: #edf4ed;
-        }
-
-        .board-grid {
-            display: grid;
-            grid-template-columns:
-                repeat(auto-fit, minmax(220px, 1fr));
-            gap: 14px;
-            margin-top: 20px;
-        }
-
-        .board-card {
-            position: relative;
-            padding: 16px;
-            border: 1px solid #415247;
-            border-radius: 12px;
-            background: #111813;
-        }
-
-        .board-card.selected {
-            border-color: #dce7dd;
-            background: #202c23;
-        }
-
-        .board-top {
-            display: flex;
-            gap: 10px;
-            align-items: flex-start;
-            justify-content: space-between;
-        }
-
-        .board-source {
-            margin: 0;
-            overflow-wrap: anywhere;
-        }
-
-        .board-grade {
-            display: inline-block;
-            margin-top: 8px;
-            padding: 4px 7px;
-            border: 1px solid #526557;
-            border-radius: 999px;
-            font-size: 0.72rem;
-            text-transform: uppercase;
-        }
-
-        .board-preview {
-            color: #b8c7bb;
-            line-height: 1.45;
-        }
-
-        .board-select {
-            width: 22px;
-            height: 22px;
-            accent-color: #dce7dd;
-        }
-    
-        .query-panel {
-            margin-top: 30px;
-            padding-top: 24px;
-            border-top: 1px solid #34463a;
-        }
-
-        .query-panel textarea {
-            min-height: 110px;
-        }
-
-        .online-choice {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-top: 14px;
-            color: #b8c7bb;
-        }
-
-        .online-choice input {
-            width: auto;
-        }
-
-        #query-result {
-            display: grid;
-            gap: 12px;
-            margin-top: 20px;
-        }
-</style>
-</head>
-
-<body>
-<main>
-    <section class="panel">
-        <h1>GNOMEdata</h1>
-
-        <p class="subtitle">
-            Loading Dock — deliver information to the mill.
-        </p>
-
-        <form id="ingest-form">
-            <label for="collection">
-                Collection
-            </label>
-
-            <input
-                id="collection"
-                value="default"
-                required
-            >
-
-            <label for="source">
-                Source name
-            </label>
-
-            <input
-                id="source"
-                placeholder="manual.txt"
-                required
-            >
-
-            <label for="text">
-                Information
-            </label>
-
-            <textarea
-                id="text"
-                placeholder="Paste information here..."
-                required
-            ></textarea>
-
-            <button id="mill-button" type="submit">
-                MILL THIS
-            </button>
-        </form>
-
-        <section id="mill" class="mill">
-            <div id="document" class="document">📄</div>
-
-            <div class="stations">
-                <div class="station" data-stage="0">
-                    🌲 Receiving Log
-                </div>
-
-                <div class="station" data-stage="1">
-                    🪚 Cutting Boards
-                </div>
-
-                <div class="station" data-stage="2">
-                    🔎 Grading
-                </div>
-
-                <div class="station" data-stage="3">
-                    🪵 Stacking
-                </div>
-
-                <div class="station" data-stage="4">
-                    🧠 Embedding
-                </div>
-
-                <div class="station" data-stage="5">
-                    💾 Lumber Yard
-                </div>
-            </div>
-
-            <div class="progress-shell">
-                <div id="progress" class="progress-bar"></div>
-            </div>
-
-            <div id="mill-status" class="mill-status">
-                Mill standing by.
-            </div>
-        </section>
-
-        <section id="result"></section>
-
-        <section id="workspace" class="workspace">
-            <div class="workspace-header">
-                <div>
-                    <h2>🌲 Collection Workspace</h2>
-                    <p id="workspace-summary">
-                        Loading lumber yard...
-                    </p>
-                </div>
-
-                <button
-                    id="refresh-workspace"
-                    type="button"
-                    class="secondary-button"
-                >
-                    REFRESH YARD
-                </button>
-            </div>
-
-            <div id="board-grid" class="board-grid"></div>
-
-            <div class="query-panel">
-                <h2>🧠 Ask the Yard</h2>
-
-                <textarea
-                    id="query-question"
-                    placeholder="Ask about the selected lumber..."
-                ></textarea>
-
-                <label class="online-choice">
-                    <input
-                        id="allow-online"
-                        type="checkbox"
-                    >
-                    Allow online assistance for this query
-                </label>
-
-                <button
-                    id="query-button"
-                    type="button"
-                >
-                    SEARCH THE YARD
-                </button>
-
-                <div id="query-result"></div>
-            </div>
-        </section>
-    </section>
-</main>
-
-<script>
-document.body.setAttribute(
-    "data-gnomedata-js",
-    "alive"
-);
-
-const probe = document.createElement("div");
-probe.id = "js-probe";
-probe.textContent = "⚡ GNOMEDATA JAVASCRIPT IS RUNNING";
-probe.style.cssText =
-    "position:fixed;" +
-    "top:10px;" +
-    "left:10px;" +
-    "right:10px;" +
-    "z-index:99999;" +
-    "padding:12px;" +
-    "background:white;" +
-    "color:black;" +
-    "font-weight:bold;" +
-    "text-align:center;";
-
-document.body.appendChild(probe);
-
-const form = document.getElementById("ingest-form");
-const mill = document.getElementById("mill");
-const button = document.getElementById("mill-button");
-const documentCard = document.getElementById("document");
-const progress = document.getElementById("progress");
-const millStatus = document.getElementById("mill-status");
-const result = document.getElementById("result");
-
-const stations = Array.from(
-    document.querySelectorAll(".station")
-);
-
-const stageNames = [
-    "Receiving source log...",
-    "Cutting contextual boards...",
-    "Inspecting board quality...",
-    "Sorting finished lumber...",
-    "Generating embedding vectors...",
-    "Delivering lumber to the yard..."
-];
-
-let animationTimer = null;
-let currentStage = 0;
-
-function resetMill() {
-    clearInterval(animationTimer);
-
-    currentStage = 0;
-
-    mill.className = "mill running";
-    result.className = "";
-    result.innerHTML = "";
-
-    progress.style.width = "0%";
-
-    for (const station of stations) {
-        station.className = "station";
-    }
-
-    documentCard.className = "document";
-}
-
-function showStage(index) {
-    stations.forEach((station, stationIndex) => {
-        if (stationIndex < index) {
-            station.className = "station done";
-        } else if (stationIndex === index) {
-            station.className = "station active";
-        } else {
-            station.className = "station";
-        }
-    });
-
-    millStatus.textContent = stageNames[index];
-
-    const percent = ((index + 1) / stations.length) * 90;
-    progress.style.width = percent + "%";
-
-    documentCard.classList.add("moving");
-
-    setTimeout(() => {
-        documentCard.classList.remove("moving");
-    }, 220);
-}
-
-function startMillAnimation() {
-    resetMill();
-    showStage(0);
-
-    animationTimer = setInterval(() => {
-        if (currentStage < stations.length - 1) {
-            currentStage += 1;
-            showStage(currentStage);
-        }
-    }, 550);
-}
-
-function finishMill(body) {
-    clearInterval(animationTimer);
-
-    stations.forEach((station) => {
-        station.className = "station done";
-    });
-
-    progress.style.width = "100%";
-    millStatus.textContent = "Load stored successfully.";
-    mill.className = "mill finished";
-
-    result.className = "visible";
-
-    result.innerHTML = `
-        <h2 class="result-title">✓ LOAD MILLED</h2>
-
-        <div class="metrics">
-            <div class="metric">
-                <strong>${body.total}</strong>
-                Boards
-            </div>
-
-            <div class="metric">
-                <strong>${body.accepted}</strong>
-                Accepted
-            </div>
-
-            <div class="metric">
-                <strong>${body.review}</strong>
-                Review
-            </div>
-
-            <div class="metric">
-                <strong>${body.rejected}</strong>
-                Rejected
-            </div>
-
-            <div class="metric">
-                <strong>${body.embedded}</strong>
-                Embedded
-            </div>
-        </div>
-
-        <div class="meta">
-            <strong>Source:</strong>
-            ${escapeHtml(body.source_name)}
-            <br>
-
-            <strong>Collection:</strong>
-            ${escapeHtml(body.collection_id)}
-            <br>
-
-            <strong>Log:</strong>
-            ${escapeHtml(body.log_id)}
-        </div>
-    `;
-    loadWorkspace();
-}
-
-function failMill(body) {
-    clearInterval(animationTimer);
-
-    mill.className = "mill failed";
-    progress.style.width = "0%";
-    millStatus.textContent = "Mill stopped.";
-
-    result.className = "visible error";
-    result.textContent =
-        "Mill rejected the load:\\n" +
-        JSON.stringify(body, null, 2);
-}
-
-function escapeHtml(value) {
-    const element = document.createElement("div");
-    element.textContent = String(value ?? "");
-    return element.innerHTML;
-}
-
-
-const workspaceSummary =
-    document.getElementById("workspace-summary");
-
-const boardGrid =
-    document.getElementById("board-grid");
-
-const refreshWorkspace =
-    document.getElementById("refresh-workspace");
-
-
-async function loadWorkspace() {
-    const collectionId =
-        document.getElementById("collection").value.trim();
-
-    if (!collectionId) {
-        return;
-    }
-
-    workspaceSummary.textContent =
-        "Opening " + collectionId + "...";
-
-    try {
-        const response = await fetch(
-            "/api/collections/" +
-            encodeURIComponent(collectionId) +
-            "/boards"
-        );
-
-        const body = await response.json();
-
-        if (!response.ok) {
-            workspaceSummary.textContent =
-                "Collection unavailable.";
-
-            boardGrid.innerHTML = "";
-            return;
-        }
-
-        workspaceSummary.textContent =
-            body.name +
-            " — " +
-            body.total +
-            (body.total === 1 ? " board" : " boards");
-
-        boardGrid.innerHTML = "";
-
-        if (body.boards.length === 0) {
-            boardGrid.innerHTML =
-                '<p class="subtitle">' +
-                'No lumber stored yet.' +
-                '</p>';
-
-            return;
-        }
-
-        for (const board of body.boards) {
-            const card = document.createElement("article");
-            card.className = "board-card selected";
-
-            const preview =
-                board.text.length > 180
-                    ? board.text.slice(0, 180) + "..."
-                    : board.text;
-
-            card.innerHTML = `
-                <div class="board-top">
-                    <div>
-                        <h3 class="board-source">
-                            📄 ${escapeHtml(board.source_name)}
-                        </h3>
-
-                        <span class="board-grade">
-                            ${escapeHtml(board.grade)}
-                        </span>
-                    </div>
-
-                    <input
-                        class="board-select"
-                        type="checkbox"
-                        checked
-                        data-board-id="${escapeHtml(board.board_id)}"
-                        aria-label="Select board"
-                    >
-                </div>
-
-                <p class="board-preview">
-                    ${escapeHtml(preview)}
-                </p>
-            `;
-
-            const checkbox =
-                card.querySelector(".board-select");
-
-            checkbox.addEventListener("change", () => {
-                card.classList.toggle(
-                    "selected",
-                    checkbox.checked
-                );
-            });
-
-            boardGrid.appendChild(card);
-        }
-    } catch (error) {
-        workspaceSummary.textContent =
-            "Unable to load Lumber Yard: " +
-            String(error);
-
-        boardGrid.innerHTML = "";
-        console.error(
-            "GNOMEdata workspace error:",
-            error
-        );
-    }
-}
-
-
-refreshWorkspace.addEventListener(
-    "click",
-    loadWorkspace
-);
-
-
-const queryButton =
-    document.getElementById("query-button");
-
-const queryResult =
-    document.getElementById("query-result");
-
-if (queryButton && queryResult) {
-    queryResult.textContent =
-        "⚡ QUERY CONTROLS ONLINE";
-}
-
-
-queryButton.addEventListener("click", async () => {
-    const question =
-        document.getElementById("query-question")
-            .value
-            .trim();
-
-    if (!question) {
-        queryResult.textContent =
-            "Give the Yard a question first.";
-        return;
-    }
-
-    const selectedBoards = Array.from(
-        document.querySelectorAll(
-            ".board-select:checked"
-        )
-    ).map(
-        checkbox => checkbox.dataset.boardId
-    );
-
-    const collectionId =
-        document.getElementById("collection")
-            .value
-            .trim();
-
-    queryResult.textContent =
-        "Searching local lumber...";
-
-    let response;
-    let body;
-
-    try {
-        response = await fetch(
-            "/api/query",
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    question: question,
-                    collection_id: collectionId,
-                    board_ids:
-                        selectedBoards.length > 0
-                            ? selectedBoards
-                            : null,
-                    allow_online:
-                        document.getElementById(
-                            "allow-online"
-                        ).checked
-                })
-            }
-        );
-
-        body = await response.json();
-    } catch (error) {
-        queryResult.textContent =
-            "Unable to reach the GNOMEdata query engine.\n" +
-            String(error);
-
-        return;
-    }
-
-    if (!response.ok) {
-        queryResult.textContent =
-            "Query failed:\n" +
-            JSON.stringify(body, null, 2);
-        return;
-    }
-
-    queryResult.innerHTML = "";
-
-    const status = document.createElement("p");
-
-    status.textContent =
-        body.online_used
-            ? "Online assistance used."
-            : "LOCAL ONLY • No online assistance used.";
-
-    queryResult.appendChild(status);
-
-    if (!body.evidence.length) {
-        const empty = document.createElement("p");
-        empty.textContent =
-            "No matching evidence found.";
-        queryResult.appendChild(empty);
-        return;
-    }
-
-    for (const evidence of body.evidence) {
-        const card = document.createElement("article");
-        card.className = "board-card";
-
-        const title = document.createElement("h3");
-        title.textContent =
-            "📄 " + evidence.source_name;
-
-        const score = document.createElement("p");
-        score.textContent =
-            "Relevance: " +
-            evidence.score.toFixed(3);
-
-        const text = document.createElement("p");
-        text.textContent = evidence.text;
-
-        card.appendChild(title);
-        card.appendChild(score);
-        card.appendChild(text);
-
-        queryResult.appendChild(card);
-    }
-});
-
-// ------------------------------------------------------------
-// GNOMEdata UI startup
-// ------------------------------------------------------------
-
-document.addEventListener("DOMContentLoaded", () => {
-    console.log("GNOMEdata UI online.");
-
-    loadWorkspace();
-
-    if (queryResult) {
-        queryResult.textContent =
-            "⚡ QUERY CONTROLS ONLINE";
-    }
-});
-
-form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-
-    button.disabled = true;
-    button.textContent = "MILL RUNNING...";
-
-    startMillAnimation();
-
-    try {
-        const response = await fetch("/api/ingest", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                collection_id:
-                    document.getElementById("collection").value,
-                source_name:
-                    document.getElementById("source").value,
-                text:
-                    document.getElementById("text").value
-            })
-        });
-
-        const body = await response.json();
-
-        if (!response.ok) {
-            failMill(body);
-            return;
-        }
-
-        finishMill(body);
-    } catch (error) {
-        failMill({
-            error: "Unable to reach GNOMEdata.",
-            detail: String(error)
-        });
-    } finally {
-        button.disabled = false;
-        button.textContent = "MILL THIS";
-    }
-});
-</script>
-
-<script>
-(() => {
-    const button = document.getElementById("query-button");
-    const output = document.getElementById("query-result");
-    const questionBox = document.getElementById("query-question");
-    const collectionBox = document.getElementById("collection");
-    const onlineBox = document.getElementById("allow-online");
-
-    if (!button || !output || !questionBox || !collectionBox) {
-        console.error("GNOMEdata: Ask the Yard controls missing.");
-        return;
-    }
-
-    button.onclick = async () => {
-        const question = questionBox.value.trim();
-
-        if (!question) {
-            output.textContent = "Enter a question first.";
-            return;
-        }
-
-        button.disabled = true;
-        button.textContent = "SEARCHING...";
-        output.textContent = "Searching the local Lumber Yard...";
-
-        try {
-            const response = await fetch("/api/query", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    question: question,
-                    collection_id:
-                        collectionBox.value.trim() || "default",
-                    board_ids: null,
-                    allow_online:
-                        onlineBox ? onlineBox.checked : false
-                })
-            });
-
-            const body = await response.json();
-
-            if (!response.ok) {
-                output.textContent =
-                    "Query failed: " +
-                    JSON.stringify(body, null, 2);
-                return;
-            }
-
-            output.innerHTML = "";
-
-            const heading = document.createElement("p");
-            heading.textContent =
-                body.online_used
-                    ? "ONLINE ASSISTANCE USED"
-                    : "LOCAL ONLY • GNOMEdata";
-            output.appendChild(heading);
-
-            if (!body.evidence || body.evidence.length === 0) {
-                const empty = document.createElement("p");
-                empty.textContent = "No matching evidence found.";
-                output.appendChild(empty);
-                return;
-            }
-
-            for (const item of body.evidence) {
-                const card = document.createElement("article");
-                card.className = "board-card";
-
-                const title = document.createElement("h3");
-                title.textContent = "📄 " + item.source_name;
-
-                const score = document.createElement("p");
-                score.textContent =
-                    "Relevance: " +
-                    Number(item.score).toFixed(3);
-
-                const evidence = document.createElement("p");
-                evidence.textContent = item.text;
-
-                card.appendChild(title);
-                card.appendChild(score);
-                card.appendChild(evidence);
-
-                output.appendChild(card);
-            }
-        } catch (error) {
-            output.textContent =
-                "Unable to reach GNOMEdata: " +
-                String(error);
-        } finally {
-            button.disabled = false;
-            button.textContent = "SEARCH THE YARD";
-        }
-    };
-
-    output.textContent = "⚡ ASK THE YARD READY";
-})();
-</script>
-
-
-<script>
-(() => {
-    const button = document.getElementById("query-button");
-    const output = document.getElementById("query-result");
-    const questionBox = document.getElementById("query-question");
-    const collectionBox = document.getElementById("collection");
-    const onlineBox = document.getElementById("allow-online");
-
-    if (!button || !output || !questionBox || !collectionBox) {
-        console.error("GNOMEdata: Ask the Yard controls missing.");
-        return;
-    }
-
-    button.onclick = async () => {
-        const question = questionBox.value.trim();
-
-        if (!question) {
-            output.textContent = "Enter a question first.";
-            return;
-        }
-
-        button.disabled = true;
-        button.textContent = "SEARCHING...";
-        output.textContent = "Searching the local Lumber Yard...";
-
-        try {
-            const response = await fetch("/api/query", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    question: question,
-                    collection_id:
-                        collectionBox.value.trim() || "default",
-                    board_ids: null,
-                    allow_online:
-                        onlineBox ? onlineBox.checked : false
-                })
-            });
-
-            const body = await response.json();
-
-            if (!response.ok) {
-                output.textContent =
-                    "Query failed: " +
-                    JSON.stringify(body, null, 2);
-                return;
-            }
-
-            output.innerHTML = "";
-
-            const heading = document.createElement("p");
-            heading.textContent =
-                body.online_used
-                    ? "ONLINE ASSISTANCE USED"
-                    : "LOCAL ONLY • GNOMEdata";
-            output.appendChild(heading);
-
-            if (!body.evidence || body.evidence.length === 0) {
-                const empty = document.createElement("p");
-                empty.textContent = "No matching evidence found.";
-                output.appendChild(empty);
-                return;
-            }
-
-            for (const item of body.evidence) {
-                const card = document.createElement("article");
-                card.className = "board-card";
-
-                const title = document.createElement("h3");
-                title.textContent = "📄 " + item.source_name;
-
-                const score = document.createElement("p");
-                score.textContent =
-                    "Relevance: " +
-                    Number(item.score).toFixed(3);
-
-                const evidence = document.createElement("p");
-                evidence.textContent = item.text;
-
-                card.appendChild(title);
-                card.appendChild(score);
-                card.appendChild(evidence);
-
-                output.appendChild(card);
-            }
-        } catch (error) {
-            output.textContent =
-                "Unable to reach GNOMEdata: " +
-                String(error);
-        } finally {
-            button.disabled = false;
-            button.textContent = "SEARCH THE YARD";
-        }
-    };
-
-    output.textContent = "⚡ ASK THE YARD READY";
-})();
-</script>
-
-</body>
-</html>
-"""
+    return Path("app/templates/index.html").read_text(encoding="utf-8")
 
 @app.post(
     "/api/ingest",
@@ -1292,6 +150,26 @@ def ingest(
             "GNOMEdata embedder is not configured."
         )
 
+    fingerprint = hashlib.sha256(
+        request.text.encode("utf-8")
+    ).hexdigest()
+
+    if yard.has_ingestion(
+        request.collection_id,
+        fingerprint,
+    ):
+        return {
+            "status": "duplicate",
+            "source_name": request.source_name,
+            "collection_id": request.collection_id,
+            "log_id": "",
+            "total": 0,
+            "accepted": 0,
+            "review": 0,
+            "rejected": 0,
+            "embedded": 0,
+        }
+
     mill = MillPipeline(
         yard=yard,
         embedder=embedder,
@@ -1306,6 +184,13 @@ def ingest(
 
     report = mill.process(log)
 
+    yard.record_ingestion(
+        request.collection_id,
+        fingerprint,
+        report.log_id,
+        request.source_name,
+    )
+
     return {
         "status": "milled",
         "source_name": report.source_name,
@@ -1316,6 +201,48 @@ def ingest(
         "review": report.review,
         "rejected": report.rejected,
         "embedded": report.embedded,
+    }
+
+
+@app.delete(
+    "/api/collections/{collection_id}/sources/{source_name}",
+    tags=["collections"],
+)
+def delete_collection_source(
+    collection_id: str,
+    source_name: str,
+) -> dict[str, str | int]:
+    """Delete one source and all of its lumber from a collection."""
+
+    yard = getattr(app.state, "yard", None)
+
+    if yard is None:
+        raise RuntimeError(
+            "GNOMEdata Lumber Yard is not configured."
+        )
+
+    if yard.get_collection(collection_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Collection not found.",
+        )
+
+    deleted = yard.delete_source(
+        source_name,
+        collection_id=collection_id,
+    )
+
+    if deleted == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Source not found.",
+        )
+
+    return {
+        "status": "deleted",
+        "collection_id": collection_id,
+        "source_name": source_name,
+        "boards_deleted": deleted,
     }
 
 
@@ -1360,6 +287,64 @@ def collection_boards(
                 "end_offset": board.end_offset,
             }
             for board in boards
+        ],
+    }
+
+
+@app.post(
+    "/api/chat",
+    tags=["gnome"],
+)
+def chat(request: ChatRequest) -> dict:
+    """Talk to the local GNOME using Lumber Yard context."""
+
+    yard = getattr(app.state, "yard", None)
+    llm = getattr(app.state, "llm", None)
+
+    if yard is None:
+        raise RuntimeError(
+            "GNOMEdata Lumber Yard is not configured."
+        )
+
+    if llm is None:
+        raise RuntimeError(
+            "GNOMEdata local model is not configured."
+        )
+
+    if yard.get_collection(request.collection_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Collection not found.",
+        )
+
+    limit = max(1, min(request.limit, 8))
+
+    matches = yard.search(
+        request.message,
+        limit=limit,
+    )
+
+    context = tuple(
+        match.board.text
+        for match in matches
+    )
+
+    response = llm.generate(
+        request.message,
+        context=context,
+    )
+
+    return {
+        "reply": response.text,
+        "model": response.model,
+        "context_used": response.context_used,
+        "sources": [
+            {
+                "board_id": match.board.board_id,
+                "source_name": match.board.source_name,
+                "score": match.score,
+            }
+            for match in matches
         ],
     }
 

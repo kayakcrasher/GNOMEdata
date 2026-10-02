@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="theme-color"
+        content="#101712"
+    >
+
+    <title>GNOMEdata</title>
+
+    <link
+        rel="stylesheet"
+        href="/static/gnome.css"
+    >
+</head>
+
+<body>
+
+<div class="app-shell">
+
+    <!-- ==================================================
+         TOP BAR
+         ================================================== -->
+
+    <header class="topbar">
+        <div class="brand">
+            <div class="brand-mark">🌲</div>
+
+            <div>
+                <h1>GNOMEdata</h1>
+                <p>Private document intelligence</p>
+            </div>
+        </div>
+
+        <div class="local-badge">
+            <span class="status-dot"></span>
+            LOCAL
+        </div>
+    </header>
+
+
+    <!-- ==================================================
+         GNOME
+         ================================================== -->
+
+    <section class="gnome-home hero-card" id="gnome-home">
+
+        <div class="gnome-header">
+
+            <div class="gnome-avatar">
+                🍄
+            </div>
+
+            <div class="gnome-title">
+                <h2>GNOME</h2>
+
+                <p class="gnome-tagline">
+                    Your little document expert in the machine.
+                </p>
+            </div>
+
+            <div
+                id="gnome-state"
+                class="gnome-state ready"
+            >
+                READY
+            </div>
+
+        </div>
+
+
+        <div class="gnome-description">
+            GNOME lives locally inside GNOMEdata.
+            Give him documents and he'll dig through
+            the library to help you find what matters.
+        </div>
+
+
+        <div id="gnome-chat" class="gnome-chat">
+
+            <div class="gnome-message gnome-message-system">
+
+                <div class="message-speaker">
+                    GNOME
+                </div>
+
+                <div class="message-body">
+                    I'm awake. Ask me something about your documents.
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <form id="gnome-form" class="gnome-form">
+
+            <label
+                for="gnome-input"
+                class="sr-only"
+            >
+                Ask GNOME
+            </label>
+
+            <div class="gnome-input-row">
+
+                <textarea
+                    id="gnome-input"
+                    placeholder="Ask GNOME about your documents..."
+                    rows="2"
+                ></textarea>
+
+                <button
+                    id="gnome-send"
+                    type="submit"
+                    class="primary-button send-button"
+                >
+                    SEND
+                </button>
+
+            </div>
+
+        </form>
+
+
+        <div class="gnome-footer">
+
+            <span id="gnome-model">
+                LOCAL MICRO-LLM
+            </span>
+
+            <span>
+                Documents stay local by default
+            </span>
+
+        </div>
+
+        <div
+            id="gnome-sources"
+            class="gnome-sources"
+        ></div>
+
+    </section>
+
+
+    <!-- ==================================================
+         NAVIGATION
+         ================================================== -->
+
+    <nav class="section-nav">
+
+        <a href="#library">
+            Library
+        </a>
+
+        <a href="#add-knowledge">
+            Add Knowledge
+        </a>
+
+        <a href="#advanced">
+            Advanced
+        </a>
+
+    </nav>
+
+
+    <!-- ==================================================
+         LIBRARY
+         ================================================== -->
+
+    <section
+        id="library"
+        class="app-card"
+    >
+
+        <div class="section-header">
+
+            <div>
+                <span class="eyebrow">
+                    KNOWLEDGE BASE
+                </span>
+
+                <h2>Your Library</h2>
+
+                <p>
+                    Documents GNOME can search locally.
+                </p>
+            </div>
+
+            <button
+                id="refresh-workspace"
+                type="button"
+                class="secondary-button compact-button"
+            >
+                REFRESH
+            </button>
+
+        </div>
+
+
+        <section
+            id="workspace"
+            class="workspace"
+        >
+
+            <div class="workspace-header">
+
+                <p id="workspace-summary">
+                    Loading your library...
+                </p>
+
+            </div>
+
+            <div
+                id="source-library"
+                class="source-library"
+            ></div>
+
+            <!-- Existing JS still uses this.
+                 Advanced users can inspect individual boards. -->
+
+            <details class="advanced-details">
+
+                <summary>
+                    Inspect document chunks
+                </summary>
+
+                <div
+                    id="board-grid"
+                    class="board-grid"
+                ></div>
+
+            </details>
+
+
+            <div class="query-panel" id="advanced">
+
+                <div class="section-header">
+
+                    <div>
+                        <span class="eyebrow">
+                            RETRIEVAL DEBUGGER
+                        </span>
+
+                        <h3>Search the Yard</h3>
+
+                        <p>
+                            Inspect the evidence GNOME retrieves
+                            from your local library.
+                        </p>
+                    </div>
+
+                </div>
+
+
+                <textarea
+                    id="query-question"
+                    placeholder="Search your local knowledge base..."
+                ></textarea>
+
+
+                <label class="online-choice">
+
+                    <input
+                        id="allow-online"
+                        type="checkbox"
+                    >
+
+                    <span>
+                        Allow configured online assistance
+                    </span>
+
+                </label>
+
+
+                <button
+                    id="query-button"
+                    type="button"
+                    class="secondary-button"
+                >
+                    SEARCH LIBRARY
+                </button>
+
+
+                <div id="query-result"></div>
+
+            </div>
+
+        </section>
+
+    </section>
+
+
+    <!-- ==================================================
+         ADD KNOWLEDGE
+         ================================================== -->
+
+    <section
+        id="add-knowledge"
+        class="app-card"
+    >
+
+        <div class="section-header">
+
+            <div>
+                <span class="eyebrow">
+                    LOADING DOCK
+                </span>
+
+                <h2>Add Knowledge</h2>
+
+                <p>
+                    Paste notes, manuals, records, procedures,
+                    research, or other text into GNOMEdata.
+                </p>
+            </div>
+
+        </div>
+
+
+        <form id="ingest-form">
+
+            <div class="form-grid">
+
+                <div>
+                    <label for="collection">
+                        Collection
+                    </label>
+
+                    <input
+                        id="collection"
+                        value="default"
+                        required
+                    >
+                </div>
+
+
+                <div>
+                    <label for="source">
+                        Document name
+                    </label>
+
+                    <input
+                        id="source"
+                        placeholder="machine-manual.txt"
+                        required
+                    >
+                </div>
+
+            </div>
+
+
+            <label for="text">
+                Document contents
+            </label>
+
+            <textarea
+                id="text"
+                placeholder="Paste information here..."
+                required
+            ></textarea>
+
+
+            <button
+                id="mill-button"
+                type="submit"
+                class="primary-button"
+            >
+                ADD TO LIBRARY
+            </button>
+
+        </form>
+
+
+        <!-- ==================================================
+             MILL ACTIVITY
+             ================================================== -->
+
+        <section id="mill" class="mill">
+
+            <div id="document" class="document">
+                📄
+            </div>
+
+            <div class="stations">
+
+                <div class="station" data-stage="0">
+                    🌲 Receiving
+                </div>
+
+                <div class="station" data-stage="1">
+                    🪚 Chunking
+                </div>
+
+                <div class="station" data-stage="2">
+                    🔎 Grading
+                </div>
+
+                <div class="station" data-stage="3">
+                    🪵 Sorting
+                </div>
+
+                <div class="station" data-stage="4">
+                    🧠 Embedding
+                </div>
+
+                <div class="station" data-stage="5">
+                    💾 Stored
+                </div>
+
+            </div>
+
+
+            <div class="progress-shell">
+
+                <div
+                    id="progress"
+                    class="progress-bar"
+                ></div>
+
+            </div>
+
+
+            <div
+                id="mill-status"
+                class="mill-status"
+            >
+                Mill standing by.
+            </div>
+
+        </section>
+
+
+        <section id="result"></section>
+
+    </section>
+
+
+    <!-- ==================================================
+         SETTINGS
+         ================================================== -->
+
+    <section class="app-card settings-card">
+
+        <details>
+
+            <summary>
+                Settings & external models
+            </summary>
+
+
+            <div class="settings-content">
+
+                <div class="setting-row">
+
+                    <div>
+                        <h3>Local-first mode</h3>
+
+                        <p>
+                            GNOMEdata uses its local knowledge
+                            system without requiring an external API.
+                        </p>
+                    </div>
+
+                    <span class="setting-status">
+                        ENABLED
+                    </span>
+
+                </div>
+
+
+                <div class="setting-row">
+
+                    <div>
+                        <h3>External model providers</h3>
+
+                        <p>
+                            Optional API-provider configuration
+                            will live here. Local operation remains
+                            the default.
+                        </p>
+                    </div>
+
+                    <span class="setting-status muted">
+                        OPTIONAL
+                    </span>
+
+                </div>
+
+            </div>
+
+        </details>
+
+    </section>
+
+
+    <footer class="app-footer">
+        GNOMEdata • Local-first document intelligence
+    </footer>
+
+</div>
+
+
+<script src="/static/gnome.js"></script>
+
+</body>
+</html>

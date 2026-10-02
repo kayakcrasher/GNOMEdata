@@ -99,6 +99,7 @@ class LumberYard:
         self._create_schema()
         self._migrate_collections()
         self._create_stack_schema()
+        self._create_ingestion_schema()
 
     def _create_schema(self) -> None:
         """Create Lumber Yard tables and indexes."""
@@ -240,6 +241,81 @@ class LumberYard:
                 ON boards(collection_id)
             """)
 
+    def _create_ingestion_schema(self) -> None:
+        """Create persistent document-ingestion tracking."""
+
+        with self._connection:
+            self._connection.execute("""
+                CREATE TABLE IF NOT EXISTS ingestions (
+                    collection_id TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    log_id TEXT NOT NULL,
+                    source_name TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP,
+
+                    PRIMARY KEY (
+                        collection_id,
+                        fingerprint
+                    ),
+
+                    FOREIGN KEY (collection_id)
+                        REFERENCES collections(collection_id)
+                        ON DELETE CASCADE
+                )
+            """)
+
+            self._connection.execute("""
+                CREATE INDEX IF NOT EXISTS
+                    idx_ingestions_fingerprint
+                ON ingestions(fingerprint)
+            """)
+
+    def has_ingestion(
+        self,
+        collection_id: str,
+        fingerprint: str,
+    ) -> bool:
+        """Return whether this document was already ingested."""
+
+        row = self._connection.execute("""
+            SELECT 1
+            FROM ingestions
+            WHERE collection_id = ?
+              AND fingerprint = ?
+            LIMIT 1
+        """, (
+            collection_id.strip(),
+            fingerprint.strip(),
+        )).fetchone()
+
+        return row is not None
+
+    def record_ingestion(
+        self,
+        collection_id: str,
+        fingerprint: str,
+        log_id: str,
+        source_name: str,
+    ) -> None:
+        """Record a successfully milled document."""
+
+        with self._connection:
+            self._connection.execute("""
+                INSERT OR IGNORE INTO ingestions (
+                    collection_id,
+                    fingerprint,
+                    log_id,
+                    source_name
+                )
+                VALUES (?, ?, ?, ?)
+            """, (
+                collection_id.strip(),
+                fingerprint.strip(),
+                log_id.strip(),
+                source_name.strip(),
+            ))
+
     def create_collection(
         self,
         collection_id: str,
@@ -328,6 +404,46 @@ class LumberYard:
 
         return cursor.rowcount
 
+
+    def delete_source(
+        self,
+        source_name: str,
+        collection_id: str = "default",
+    ) -> int:
+        """Delete every board belonging to one source in a collection."""
+
+        source_name = source_name.strip()
+        collection_id = collection_id.strip()
+
+        if not source_name:
+            raise ValueError(
+                "source_name cannot be empty."
+            )
+
+        if not collection_id:
+            raise ValueError(
+                "collection_id cannot be empty."
+            )
+
+        if self.get_collection(collection_id) is None:
+            raise KeyError(
+                f"unknown collection: {collection_id}"
+            )
+
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                DELETE FROM boards
+                WHERE collection_id = ?
+                  AND source_name = ?
+                """,
+                (
+                    collection_id,
+                    source_name,
+                ),
+            )
+
+        return cursor.rowcount
 
     def list_boards(
         self,

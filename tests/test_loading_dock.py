@@ -13,7 +13,7 @@ def test_loading_dock_page_exists() -> None:
 
     assert response.status_code == 200
     assert "GNOMEdata" in response.text
-    assert "Loading Dock" in response.text
+    assert "Add Knowledge" in response.text
 
 
 def test_ingest_rejects_empty_text() -> None:
@@ -243,3 +243,104 @@ def test_local_query_api_returns_evidence() -> None:
             item["source_name"] == "RandyRecords"
             for item in body["evidence"]
         )
+
+
+def test_identical_document_ingest_is_deduplicated(tmp_path) -> None:
+    """The same document should not be milled twice into one collection."""
+
+    from app.rag.embeddings import StaticEmbedder
+    from app.rag.yard import LumberYard
+
+    text = (
+        "GNOMEdata processes local documents and stores "
+        "searchable lumber for later retrieval."
+    )
+
+    embedder = StaticEmbedder(
+        {
+            text: [1.0, 0.0, 0.0],
+        },
+        model_name="dedupe-test-model",
+    )
+
+    yard = LumberYard(tmp_path / "dedupe.db")
+
+    app.state.yard = yard
+    app.state.embedder = embedder
+
+    payload = {
+        "collection_id": "default",
+        "source_name": "gnome-manual.txt",
+        "text": text,
+    }
+
+    try:
+        first = client.post("/api/ingest", json=payload)
+        second = client.post("/api/ingest", json=payload)
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+
+        assert first.json()["status"] == "milled"
+        assert second.json()["status"] == "duplicate"
+
+        assert yard.count() == 1
+
+    finally:
+        yard.close()
+        del app.state.yard
+        del app.state.embedder
+
+
+def test_delete_source_api_removes_source(tmp_path) -> None:
+    from app.rag.embeddings import StaticEmbedder
+    from app.rag.yard import LumberYard
+
+    text = (
+        "GNOMEdata stores this temporary machine manual "
+        "inside the local Lumber Yard."
+    )
+
+    yard = LumberYard(tmp_path / "delete-source-api.db")
+    embedder = StaticEmbedder(
+        {text: [1.0, 0.0, 0.0]},
+        model_name="delete-source-test",
+    )
+
+    app.state.yard = yard
+    app.state.embedder = embedder
+
+    try:
+        ingest = client.post(
+            "/api/ingest",
+            json={
+                "collection_id": "default",
+                "source_name": "temporary-manual.txt",
+                "text": text,
+            },
+        )
+
+        assert ingest.status_code == 200
+
+        response = client.delete(
+            "/api/collections/default/sources/"
+            "temporary-manual.txt"
+        )
+
+        assert response.status_code == 200
+
+        body = response.json()
+
+        assert body["status"] == "deleted"
+        assert body["source_name"] == "temporary-manual.txt"
+        assert body["boards_deleted"] >= 1
+
+        assert all(
+            board.source_name != "temporary-manual.txt"
+            for board in yard.list_boards("default")
+        )
+
+    finally:
+        yard.close()
+        del app.state.yard
+        del app.state.embedder

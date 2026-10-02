@@ -144,3 +144,106 @@ def test_counts_by_grade(tmp_path) -> None:
         assert yard.count() == 2
         assert yard.count(Grade.ACCEPT) == 1
         assert yard.count(Grade.REJECT) == 1
+
+
+def test_duplicate_text_different_collections_is_allowed(tmp_path) -> None:
+    with LumberYard(tmp_path / "yard.db") as yard:
+        yard.create_collection("project-b", "Project B")
+
+        yard.add_board(
+            make_board("default-copy", "Randy sells pies."),
+            Inspection(Grade.ACCEPT, ()),
+            collection_id="default",
+        )
+        yard.add_board(
+            make_board("project-copy", "Randy sells pies."),
+            Inspection(Grade.ACCEPT, ()),
+            collection_id="project-b",
+        )
+
+        assert len(yard.list_boards("default")) == 1
+        assert len(yard.list_boards("project-b")) == 1
+
+
+def test_different_text_same_collection_is_allowed(tmp_path) -> None:
+    with LumberYard(tmp_path / "yard.db") as yard:
+        yard.add_board(
+            make_board("board-a", "Randy sells pies."),
+            Inspection(Grade.ACCEPT, ()),
+        )
+        yard.add_board(
+            make_board("board-b", "Randy lives in Denver."),
+            Inspection(Grade.ACCEPT, ()),
+        )
+
+        assert len(yard.list_boards("default")) == 2
+
+def test_delete_source_removes_its_boards(tmp_path) -> None:
+    with LumberYard(tmp_path / "yard.db") as yard:
+        yard.add_board(
+            make_board("randy-1", "Randy sells pies."),
+            Inspection(Grade.ACCEPT, ()),
+        )
+
+        other = Board(
+            board_id="pump-2",
+            log_id="manual-2",
+            source_name="other-manual.txt",
+            text="Inspect the hydraulic pump.",
+            start_offset=0,
+            end_offset=len("Inspect the hydraulic pump."),
+        )
+
+        yard.add_board(
+            other,
+            Inspection(Grade.ACCEPT, ()),
+        )
+
+        removed = yard.delete_source(
+            "pump-manual.txt",
+            collection_id="default",
+        )
+
+        assert removed == 1
+        assert yard.get_board("randy-1") is None
+        assert yard.get_board("pump-2") is not None
+
+
+def test_delete_source_is_collection_scoped(tmp_path) -> None:
+    with LumberYard(tmp_path / "yard.db") as yard:
+        yard.create_collection("other", "Other")
+
+        first = make_board(
+            "default-board",
+            "Default collection knowledge.",
+        )
+
+        second = Board(
+            board_id="other-board",
+            log_id="other-log",
+            source_name=first.source_name,
+            text="Other collection knowledge.",
+            start_offset=0,
+            end_offset=len("Other collection knowledge."),
+        )
+
+        yard.add_board(
+            first,
+            Inspection(Grade.ACCEPT, ()),
+            collection_id="default",
+        )
+
+        yard.add_board(
+            second,
+            Inspection(Grade.ACCEPT, ()),
+            collection_id="other",
+        )
+
+        removed = yard.delete_source(
+            first.source_name,
+            collection_id="default",
+        )
+
+        assert removed == 1
+        assert yard.get_board("default-board") is None
+        assert yard.get_board("other-board") is not None

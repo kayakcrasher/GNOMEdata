@@ -1,76 +1,76 @@
-"""Tests for the GNOMEdata MicroLLM."""
+"""Tests for GNOMEdata's local micro-LLM boundary."""
 
-from app.micro_llm.model import MicroLanguageModel
-from app.micro_llm.tokenizer import Tokenizer
-
-
-def test_tokenizer_round_trip() -> None:
-    tokenizer = Tokenizer.train(
-        "gnomes mill data."
-    )
-
-    encoded = tokenizer.encode(
-        "gnomes mill data."
-    )
-
-    assert tokenizer.decode(encoded) == (
-        "gnomes mill data."
-    )
+from app.llm import MicroLLM
 
 
-def test_model_probabilities_sum_to_one() -> None:
-    model = MicroLanguageModel(4)
+def test_micro_llm_identifies_itself() -> None:
+    model = MicroLLM()
 
-    probabilities = model.probabilities(0)
-
-    assert abs(sum(probabilities) - 1.0) < 1e-9
+    assert model.model_name == "gnome-micro-99k"
 
 
-def test_training_reduces_loss() -> None:
-    tokenizer = Tokenizer.train(
-        "randy sells pies. "
-        "randy sells pies. "
-        "randy sells pies."
-    )
+def test_micro_llm_uses_context() -> None:
+    model = MicroLLM()
 
-    model = MicroLanguageModel(
-        tokenizer.vocab_size
-    )
-
-    losses = model.train(
-        tokenizer.encode(
-            "randy sells pies. "
-            "randy sells pies. "
-            "randy sells pies."
+    response = model.generate(
+        "What does Randy sell?",
+        context=(
+            "Randy sells pies from his home.",
         ),
-        epochs=100,
     )
 
-    assert losses[-1] < losses[0]
+    assert "Randy sells pies" in response.text
+    assert response.context_used == 1
+    assert response.model == "gnome-micro-99k"
 
 
-def test_model_generates_tokens() -> None:
-    tokenizer = Tokenizer.train(
-        "randy sells pies."
+def test_micro_llm_handles_missing_context() -> None:
+    model = MicroLLM()
+
+    response = model.generate(
+        "What powers the machine?",
     )
 
-    model = MicroLanguageModel(
-        tokenizer.vocab_size
-    )
+    assert response.context_used == 0
+    assert response.text
 
-    model.train(
-        tokenizer.encode(
-            "randy sells pies."
+
+def test_micro_llm_handles_empty_prompt() -> None:
+    model = MicroLLM()
+
+    response = model.generate("   ")
+
+    assert response.text
+    assert response.context_used == 0
+
+
+def test_micro_llm_can_receive_multiple_boards() -> None:
+    model = MicroLLM()
+
+    response = model.generate(
+        "Tell me about Randy.",
+        context=(
+            "Randy sells pies.",
+            "Randy owns a dog named Tom.",
         ),
-        epochs=50,
     )
 
-    start = tokenizer.encode("randy")[0]
+    assert response.context_used == 2
+    assert "Randy sells pies" in response.text
+    assert "Tom" in response.text
 
-    generated = model.generate(
-        start,
-        length=8,
+
+def test_micro_llm_can_receive_multiple_boards() -> None:
+    model = MicroLLM()
+
+    response = model.generate(
+        "Tell me about Randy.",
+        context=(
+            "Randy sells pies.",
+            "Randy owns a dog named Tom.",
+        ),
     )
 
-    assert len(generated) == 8
-    assert generated[0] == start
+    assert response.context_used == 2
+    assert "Randy sells pies" in response.text
+    assert "Tom" in response.text
