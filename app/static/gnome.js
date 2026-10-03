@@ -222,6 +222,143 @@ async function loadWorkspace() {
 
         boardGrid.innerHTML = "";
 
+        // ----------------------------------------------------
+        // Human-facing document library
+        // ----------------------------------------------------
+
+        const sourceLibrary =
+            document.getElementById("source-library");
+
+        if (sourceLibrary) {
+            sourceLibrary.innerHTML = "";
+
+            const sources = new Map();
+
+            for (const board of body.boards) {
+                const sourceName =
+                    board.source_name || "Unknown source";
+
+                sources.set(
+                    sourceName,
+                    (sources.get(sourceName) || 0) + 1
+                );
+            }
+
+            if (sources.size === 0) {
+                const empty =
+                    document.createElement("p");
+
+                empty.className = "subtitle";
+                empty.textContent =
+                    "No documents stored yet.";
+
+                sourceLibrary.appendChild(empty);
+            }
+
+            for (const [sourceName, count] of sources) {
+                const card =
+                    document.createElement("article");
+
+                card.className = "source-card";
+
+                const info =
+                    document.createElement("div");
+
+                const title =
+                    document.createElement("h3");
+
+                title.textContent =
+                    "📄 " + sourceName;
+
+                const meta =
+                    document.createElement("p");
+
+                meta.textContent =
+                    count +
+                    (count === 1
+                        ? " searchable chunk"
+                        : " searchable chunks");
+
+                info.appendChild(title);
+                info.appendChild(meta);
+
+                const remove =
+                    document.createElement("button");
+
+                remove.type = "button";
+                remove.className = "delete-source";
+                remove.textContent = "DELETE";
+
+                remove.addEventListener(
+                    "click",
+                    async () => {
+                        const confirmed =
+                            window.confirm(
+                                'Remove "' +
+                                sourceName +
+                                '" from GNOMEdata?'
+                            );
+
+                        if (!confirmed) {
+                            return;
+                        }
+
+                        remove.disabled = true;
+                        remove.textContent =
+                            "REMOVING...";
+
+                        try {
+                            const deleteResponse =
+                                await fetch(
+                                    "/api/collections/" +
+                                    encodeURIComponent(
+                                        collectionId
+                                    ) +
+                                    "/sources/" +
+                                    encodeURIComponent(
+                                        sourceName
+                                    ),
+                                    {
+                                        method: "DELETE"
+                                    }
+                                );
+
+                            const deleteBody =
+                                await deleteResponse.json();
+
+                            if (!deleteResponse.ok) {
+                                throw new Error(
+                                    deleteBody.detail ||
+                                    "Delete failed."
+                                );
+                            }
+
+                            await loadWorkspace();
+
+                        } catch (error) {
+                            console.error(
+                                "GNOMEdata delete error:",
+                                error
+                            );
+
+                            window.alert(
+                                "Could not remove document.\n\n" +
+                                String(error)
+                            );
+
+                            remove.disabled = false;
+                            remove.textContent = "DELETE";
+                        }
+                    }
+                );
+
+                card.appendChild(info);
+                card.appendChild(remove);
+
+                sourceLibrary.appendChild(card);
+            }
+        }
+
         if (body.boards.length === 0) {
             boardGrid.innerHTML =
                 '<p class="subtitle">' +
