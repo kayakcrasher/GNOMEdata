@@ -9,10 +9,10 @@ class TransformerConfig:
     context_size: int = 512
 
     # Keep v0.4 small enough for phone experiments.
-    d_model: int = 64
+    d_model: int = 128
     num_heads: int = 4
-    d_ff: int = 128
-    num_layers: int = 1
+    d_ff: int = 384
+    num_layers: int = 2
 
     dropout: float = 0.0
     seed: int = 42

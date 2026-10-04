@@ -26,6 +26,7 @@ class ModelCache:
     hidden: np.ndarray
     probabilities: np.ndarray
     targets: np.ndarray
+    weights: np.ndarray | None = None
 
 
 class TransformerLanguageModel:
@@ -105,6 +106,7 @@ class TransformerLanguageModel:
         self,
         inputs: np.ndarray,
         targets: np.ndarray,
+        weights: np.ndarray | None = None,
     ) -> tuple[float, ModelCache]:
         hidden, embedding_cache = (
             self.embeddings.forward(
@@ -132,6 +134,7 @@ class TransformerLanguageModel:
             cross_entropy_forward(
                 logits,
                 targets,
+                weights=weights,
             )
         )
 
@@ -141,6 +144,7 @@ class TransformerLanguageModel:
             hidden=hidden,
             probabilities=probabilities,
             targets=targets,
+            weights=weights,
         )
 
     def backward(
@@ -150,6 +154,7 @@ class TransformerLanguageModel:
         grad_logits = cross_entropy_backward(
             cache.probabilities,
             cache.targets,
+            weights=cache.weights,
         )
 
         flat_hidden = cache.hidden.reshape(
