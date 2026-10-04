@@ -1,0 +1,147 @@
+"""Extract structured posts from 4chan thread HTML."""
+
+from dataclasses import dataclass
+from html.parser import HTMLParser
+import re
+
+
+@dataclass(frozen=True)
+class FourChanPost:
+    post_id: str
+    text: str
+
+
+class FourChanThreadParser(HTMLParser):
+    """Extract post bodies and IDs from a 4chan thread."""
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.posts: list[FourChanPost] = []
+
+        self._inside_post = False
+        self._post_depth = 0
+        self._post_id = ""
+        self._text_parts: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs,
+    ) -> None:
+        attributes = dict(attrs)
+
+        classes = set(
+            attributes.get(
+                "class",
+                "",
+            ).split()
+        )
+
+        if (
+            not self._inside_post
+            and "post" in classes
+            and "reply" in classes
+            or (
+                not self._inside_post
+                and "post" in classes
+                and "op" in classes
+            )
+        ):
+            self._inside_post = True
+            self._post_depth = 1
+
+            raw_id = attributes.get(
+                "id",
+                "",
+            )
+
+            self._post_id = re.sub(
+                r"\D",
+                "",
+                raw_id,
+            )
+
+            self._text_parts = []
+
+            return
+
+        if self._inside_post:
+            self._post_depth += 1
+
+            if tag in {
+                "br",
+                "p",
+            }:
+                self._text_parts.append(
+                    "\n"
+                )
+
+    def handle_endtag(
+        self,
+        tag: str,
+    ) -> None:
+        if not self._inside_post:
+            return
+
+        self._post_depth -= 1
+
+        if self._post_depth > 0:
+            return
+
+        text = "".join(
+            self._text_parts
+        )
+
+        text = re.sub(
+            r"[ \t]+",
+            " ",
+            text,
+        )
+
+        text = re.sub(
+            r"\n{3,}",
+            "\n\n",
+            text,
+        )
+
+        text = text.strip()
+
+        if text:
+            self.posts.append(
+                FourChanPost(
+                    post_id=self._post_id,
+                    text=text,
+                )
+            )
+
+        self._inside_post = False
+        self._post_depth = 0
+        self._post_id = ""
+        self._text_parts = []
+
+    def handle_data(
+        self,
+        data: str,
+    ) -> None:
+        if not self._inside_post:
+            return
+
+        text = data.strip()
+
+        if text:
+            self._text_parts.append(
+                text + " "
+            )
+
+
+def extract_posts(
+    html: str,
+) -> tuple[FourChanPost, ...]:
+    parser = FourChanThreadParser()
+
+    parser.feed(html)
+
+    return tuple(
+        parser.posts
+    )

@@ -1,0 +1,267 @@
+"""Safe, lightweight webpage fetching for GNOMEdata."""
+
+from dataclasses import dataclass
+from html.parser import HTMLParser
+from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin, urlparse
+from urllib.request import Request, urlopen
+
+
+MAX_RESPONSE_BYTES = 2_000_000
+
+
+@dataclass(frozen=True)
+class FetchedPage:
+    """Clean representation of a fetched webpage."""
+
+    url: str
+    title: str
+    text: str
+    links: tuple[str, ...]
+    status: int
+    html: str
+
+
+class _PageParser(HTMLParser):
+    """Extract useful text, title, and links from HTML."""
+
+    SKIP_TAGS = {
+        "script",
+        "style",
+        "noscript",
+        "svg",
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+
+        self._skip_depth = 0
+        self._inside_title = False
+
+        self.title_parts: list[str] = []
+        self.text_parts: list[str] = []
+        self.links: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs,
+    ) -> None:
+        tag = tag.lower()
+
+        if tag in self.SKIP_TAGS:
+            self._skip_depth += 1
+            return
+
+        if tag == "title":
+            self._inside_title = True
+
+        if tag == "a":
+            attributes = dict(attrs)
+            href = attributes.get("href")
+
+            if href:
+                self.links.append(href)
+
+    def handle_endtag(
+        self,
+        tag: str,
+    ) -> None:
+        tag = tag.lower()
+
+        if tag in self.SKIP_TAGS:
+            if self._skip_depth > 0:
+                self._skip_depth -= 1
+
+            return
+
+        if tag == "title":
+            self._inside_title = False
+
+    def handle_data(
+        self,
+        data: str,
+    ) -> None:
+        if self._skip_depth:
+            return
+
+        cleaned = " ".join(
+            data.split()
+        )
+
+        if not cleaned:
+            return
+
+        if self._inside_title:
+            self.title_parts.append(cleaned)
+
+        self.text_parts.append(cleaned)
+
+
+def _validate_url(url: str) -> None:
+    parsed = urlparse(url)
+
+    if parsed.scheme not in {
+        "http",
+        "https",
+    }:
+        raise ValueError(
+            "URL must use http or https."
+        )
+
+    if not parsed.hostname:
+        raise ValueError(
+            "URL must contain a hostname."
+        )
+
+
+def _clean_links(
+    base_url: str,
+    links: list[str],
+) -> tuple[str, ...]:
+    cleaned = []
+    seen = set()
+
+    for link in links:
+        absolute = urljoin(
+            base_url,
+            link,
+        )
+
+        parsed = urlparse(absolute)
+
+        if parsed.scheme not in {
+            "http",
+            "https",
+        }:
+            continue
+
+        # Remove page fragments.
+        absolute = parsed._replace(
+            fragment="",
+        ).geturl()
+
+        if absolute in seen:
+            continue
+
+        seen.add(absolute)
+        cleaned.append(absolute)
+
+    return tuple(cleaned)
+
+
+class WebFetcher:
+    """Fetch individual webpages for GNOMEdata."""
+
+    def __init__(
+        self,
+        timeout: float = 10.0,
+        max_bytes: int = MAX_RESPONSE_BYTES,
+    ) -> None:
+        self.timeout = timeout
+        self.max_bytes = max_bytes
+
+    def fetch(
+        self,
+        url: str,
+    ) -> FetchedPage:
+        _validate_url(url)
+
+        request = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "GNOMEdata/0.1 "
+                    "(document research tool)"
+                ),
+                "Accept": (
+                    "text/html,"
+                    "application/xhtml+xml"
+                ),
+            },
+        )
+
+        try:
+            with urlopen(
+                request,
+                timeout=self.timeout,
+            ) as response:
+                status = getattr(
+                    response,
+                    "status",
+                    200,
+                )
+
+                content_type = (
+                    response.headers
+                    .get_content_type()
+                )
+
+                if content_type not in {
+                    "text/html",
+                    "application/xhtml+xml",
+                }:
+                    raise ValueError(
+                        "GNOMEdata currently reads "
+                        "HTML webpages only."
+                    )
+
+                raw = response.read(
+                    self.max_bytes + 1
+                )
+
+                if len(raw) > self.max_bytes:
+                    raise ValueError(
+                        "Webpage exceeds GNOMEdata's "
+                        "maximum response size."
+                    )
+
+                charset = (
+                    response.headers
+                    .get_content_charset()
+                    or "utf-8"
+                )
+
+                html = raw.decode(
+                    charset,
+                    errors="replace",
+                )
+
+                final_url = response.geturl()
+
+        except HTTPError as error:
+            raise RuntimeError(
+                f"Website returned HTTP "
+                f"{error.code}."
+            ) from error
+
+        except URLError as error:
+            raise RuntimeError(
+                f"Unable to reach website: "
+                f"{error.reason}"
+            ) from error
+
+        parser = _PageParser()
+        parser.feed(html)
+
+        title = " ".join(
+            parser.title_parts
+        ).strip()
+
+        text = "\n".join(
+            parser.text_parts
+        ).strip()
+
+        links = _clean_links(
+            final_url,
+            parser.links,
+        )
+
+        return FetchedPage(
+            url=final_url,
+            title=title,
+            text=text,
+            links=links,
+            status=status,
+            html=html,
+        )

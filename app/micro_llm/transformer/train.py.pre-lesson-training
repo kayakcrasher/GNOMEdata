@@ -1,0 +1,346 @@
+"""Train GNOME Micro Transformer using pure NumPy."""
+
+import argparse
+from pathlib import Path
+
+import numpy as np
+
+from app.micro_llm.transformer.model import (
+    TransformerLanguageModel,
+)
+
+
+def load_training_bytes(path: Path) -> np.ndarray:
+    """Load every text file beneath the training directory."""
+
+    chunks = []
+
+    for file in sorted(path.rglob("*.txt")):
+        data = file.read_bytes()
+
+        if data:
+            chunks.append(data)
+
+    if not chunks:
+        raise RuntimeError(
+            f"No training text found in {path}"
+        )
+
+    corpus = b"\n".join(chunks)
+
+    return np.frombuffer(
+        corpus,
+        dtype=np.uint8,
+    ).astype(np.int64)
+
+
+def parameters(model):
+    """Map gradient names to actual model parameters."""
+
+    result = {
+        "lm_head": model.lm_head,
+        "lm_bias": model.lm_bias,
+        "embeddings.token": model.embeddings.token,
+        "embeddings.position": model.embeddings.position,
+    }
+
+    for index, block in enumerate(model.blocks):
+        prefix = f"blocks.{index}"
+
+        result.update({
+            f"{prefix}.wq": block.attention.wq,
+            f"{prefix}.wk": block.attention.wk,
+            f"{prefix}.wv": block.attention.wv,
+            f"{prefix}.wo": block.attention.wo,
+
+            f"{prefix}.w1": block.w1,
+            f"{prefix}.b1": block.b1,
+            f"{prefix}.w2": block.w2,
+            f"{prefix}.b2": block.b2,
+
+            f"{prefix}.ln1_gamma":
+                block.ln1_gamma,
+
+            f"{prefix}.ln1_beta":
+                block.ln1_beta,
+
+            f"{prefix}.ln2_gamma":
+                block.ln2_gamma,
+
+            f"{prefix}.ln2_beta":
+                block.ln2_beta,
+        })
+
+    return result
+
+
+def sample_batch(
+    tokens: np.ndarray,
+    context: int,
+    batch_size: int,
+    rng: np.random.Generator,
+):
+    """Sample random next-byte training sequences."""
+
+    maximum = len(tokens) - context - 1
+
+    if maximum <= 0:
+        raise RuntimeError(
+            "Training corpus is smaller than "
+            "the model context window."
+        )
+
+    starts = rng.integers(
+        0,
+        maximum,
+        size=batch_size,
+    )
+
+    x = np.stack([
+        tokens[start:start + context]
+        for start in starts
+    ])
+
+    y = np.stack([
+        tokens[
+            start + 1:
+            start + context + 1
+        ]
+        for start in starts
+    ])
+
+    return x, y
+
+
+def clip_gradients(
+    gradients,
+    maximum_norm: float,
+):
+    """Global gradient-norm clipping."""
+
+    total_squared = 0.0
+
+    for gradient in gradients.values():
+        total_squared += float(
+            np.sum(gradient * gradient)
+        )
+
+    norm = np.sqrt(total_squared)
+
+    if norm > maximum_norm:
+        scale = maximum_norm / (
+            norm + 1e-8
+        )
+
+        for gradient in gradients.values():
+            gradient *= scale
+
+    return float(norm)
+
+
+def save_model(
+    model,
+    path: Path,
+):
+    """Save every trainable parameter."""
+
+    state = parameters(model)
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    np.savez(
+        path,
+        **state,
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--data",
+        default="data/training",
+    )
+
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=1000,
+    )
+
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+    )
+
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=0.01,
+    )
+
+    parser.add_argument(
+        "--clip",
+        type=float,
+        default=1.0,
+    )
+
+    parser.add_argument(
+        "--output",
+        default="models/gnome-transformer-v04.npz",
+    )
+
+    args = parser.parse_args()
+
+    model = TransformerLanguageModel()
+
+    rng = np.random.default_rng(2026)
+
+    tokens = load_training_bytes(
+        Path(args.data)
+    )
+
+    params = parameters(model)
+
+    print("GNOME Micro v0.4 — TRANSFORMER")
+    print("--------------------------------")
+    print(
+        "Training bytes:",
+        f"{len(tokens):,}",
+    )
+    print(
+        "Parameters:",
+        f"{model.parameter_count:,}",
+    )
+    print(
+        "Context:",
+        model.config.context_size,
+    )
+    print(
+        "Batch size:",
+        args.batch_size,
+    )
+    print(
+        "Steps:",
+        args.steps,
+    )
+    print(
+        "Learning rate:",
+        args.learning_rate,
+    )
+    print()
+
+    running_loss = None
+
+    for step in range(
+        1,
+        args.steps + 1,
+    ):
+        x, y = sample_batch(
+            tokens,
+            model.config.context_size,
+            args.batch_size,
+            rng,
+        )
+
+        loss, cache = model.forward_loss(
+            x,
+            y,
+        )
+
+        gradients = model.backward(
+            cache
+        )
+
+        grad_norm = clip_gradients(
+            gradients,
+            args.clip,
+        )
+
+        for name, parameter in params.items():
+            parameter -= (
+                args.learning_rate
+                * gradients[name]
+            )
+
+        if running_loss is None:
+            running_loss = loss
+        else:
+            running_loss = (
+                0.95 * running_loss
+                + 0.05 * loss
+            )
+
+        if (
+            step == 1
+            or step % 25 == 0
+            or step == args.steps
+        ):
+            print(
+                f"Step {step:05d} | "
+                f"loss {loss:.4f} | "
+                f"avg {running_loss:.4f} | "
+                f"grad {grad_norm:.4f}"
+            )
+
+        if not np.isfinite(loss):
+            raise RuntimeError(
+                "Training diverged: "
+                "loss became non-finite."
+            )
+
+    output = Path(args.output)
+
+    save_model(
+        model,
+        output,
+    )
+
+    print()
+    print(
+        "Saved:",
+        output,
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+
+def load_training_lessons(
+    path: Path,
+) -> list[np.ndarray]:
+    """Load QUESTION/EVIDENCE/ANSWER lessons separately."""
+
+    lessons = []
+
+    for file in sorted(path.rglob("*.txt")):
+        text = file.read_text(
+            encoding="utf-8",
+        )
+
+        for raw in text.split("\n\n"):
+            raw = raw.strip()
+
+            if not raw:
+                continue
+
+            data = raw.encode("utf-8")
+
+            lessons.append(
+                np.frombuffer(
+                    data,
+                    dtype=np.uint8,
+                ).astype(np.int64)
+            )
+
+    if not lessons:
+        raise RuntimeError(
+            f"No training lessons found in {path}"
+        )
+
+    return lessons
