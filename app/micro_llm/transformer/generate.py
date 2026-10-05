@@ -64,6 +64,19 @@ def generate(
             context[None, :]
         )[0, -1]
 
+        # v0.6 copy bias during inference.
+        counts = np.bincount(
+            context,
+            minlength=model.config.vocab_size,
+        ).astype(np.float32)
+
+        counts /= max(1, len(context))
+
+        logits = (
+            logits
+            + model.copy_strength * counts
+        )
+
         logits = logits / temperature
         logits = logits - np.max(logits)
 

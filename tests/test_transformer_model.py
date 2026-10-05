@@ -57,4 +57,4 @@ def test_transformer_loss_is_finite() -> None:
 def test_parameter_count() -> None:
     model = TransformerLanguageModel()
 
-    assert model.parameter_count == 461056
+    assert model.parameter_count == 461057

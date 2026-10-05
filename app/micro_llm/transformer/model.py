@@ -27,6 +27,7 @@ class ModelCache:
     probabilities: np.ndarray
     targets: np.ndarray
     weights: np.ndarray | None = None
+    copy_mask: np.ndarray | None = None
 
 
 class TransformerLanguageModel:
@@ -71,6 +72,12 @@ class TransformerLanguageModel:
 
         self.lm_bias = np.zeros(
             self.config.vocab_size,
+            dtype=np.float32,
+        )
+
+        # v0.6 trainable copy-head strength.
+        self.copy_strength = np.array(
+            0.0,
             dtype=np.float32,
         )
 
@@ -130,6 +137,31 @@ class TransformerLanguageModel:
             + self.lm_bias
         )
 
+        # v0.6 copy bias:
+        # favor bytes that already occur in the visible context.
+        copy_mask = np.zeros_like(logits)
+
+        batch, length = inputs.shape
+
+        rows = np.arange(batch)[:, None]
+        positions = np.arange(length)[None, :]
+
+        for source_position in range(length):
+            source_tokens = inputs[:, source_position]
+
+            copy_mask[
+                rows,
+                positions,
+                source_tokens[:, None],
+            ] += 1.0
+
+        copy_mask /= max(1, length)
+
+        logits = (
+            logits
+            + self.copy_strength * copy_mask
+        )
+
         loss, probabilities = (
             cross_entropy_forward(
                 logits,
@@ -145,6 +177,7 @@ class TransformerLanguageModel:
             probabilities=probabilities,
             targets=targets,
             weights=weights,
+            copy_mask=copy_mask,
         )
 
     def backward(
@@ -182,9 +215,17 @@ class TransformerLanguageModel:
             @ self.lm_head.T
         )
 
+        grad_copy_strength = np.array(
+            np.sum(
+                grad_logits * cache.copy_mask
+            ),
+            dtype=np.float32,
+        )
+
         gradients = {
             "lm_head": grad_lm_head,
             "lm_bias": grad_lm_bias,
+            "copy_strength": grad_copy_strength,
         }
 
         for index in reversed(
@@ -229,4 +270,5 @@ class TransformerLanguageModel:
             )
             + self.lm_head.size
             + self.lm_bias.size
+            + self.copy_strength.size
         )

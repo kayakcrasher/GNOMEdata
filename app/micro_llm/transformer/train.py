@@ -127,6 +127,7 @@ def parameters(model):
     result = {
         "lm_head": model.lm_head,
         "lm_bias": model.lm_bias,
+        "copy_strength": model.copy_strength,
         "embeddings.token": model.embeddings.token,
         "embeddings.position": model.embeddings.position,
     }
